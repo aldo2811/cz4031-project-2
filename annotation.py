@@ -28,24 +28,25 @@ def get_query_execution_plan(cursor, sql_query):
 
 
 def convert_query_cond_to_plan_like_cond(query_cond):
-    if 'gt' in query_cond:
-        assert len(query_cond['gt']) == 2
-        return ' > '.join(map(str, query_cond['gt'])), ' < '.join(map(str, reversed(query_cond['gt'])))
-    if 'lt' in query_cond:
-        assert len(query_cond['lt']) == 2
-        return ' < '.join(map(str, query_cond['lt'])), ' > '.join(map(str, reversed(query_cond['lt'])))
-    if 'eq' in query_cond:
-        assert len(query_cond['eq']) == 2
-        return ' = '.join(map(str, query_cond['eq'])), ' = '.join(map(str, reversed(query_cond['eq'])))
-    if 'neq' in query_cond:
-        assert len(query_cond['neq']) == 2
-        return ' <> '.join(map(str, query_cond['neq'])), ' <> '.join(map(str, reversed(query_cond['neq'])))
-    if 'gte' in query_cond:
-        assert len(query_cond['gte']) == 2
-        return ' >= '.join(map(str, query_cond['gte'])), ' <= '.join(map(str, reversed(query_cond['gte'])))
-    if 'lte' in query_cond:
-        assert len(query_cond['lte']) == 2
-        return ' <= '.join(map(str, query_cond['lte'])), ' >= '.join(map(str, reversed(query_cond['lte'])))
+    """
+    convert condition from parsed query to be like plan condition
+    :param query_cond:
+    :return:
+    """
+    comp_ops = {
+        'gt': (' > ', ' < '),
+        'lt': (' < ', ' > '),
+        'eq': (' = ', ' = '),
+        'neq': (' <> ', ' <> '),
+        'gte': (' >= ', ' <= '),
+        'lte': (' <= ', ' >= '),
+    }
+    for comp_op, comp_op_rep in comp_ops.items():
+        if comp_op in query_cond:
+            assert len(query_cond[comp_op]) == 2
+            return \
+                comp_op_rep[0].join(map(str, query_cond[comp_op])), \
+                comp_op_rep[1].join(map(str, reversed(query_cond[comp_op])))
 
 
 def compare_condition(query_cond, plan_cond) -> bool:
@@ -70,6 +71,7 @@ def transverse_plan(plan):
     nc = NodeCoverage()
     logging.debug(f"now in {plan['Node Type']}")
     if plan['Node Type'] == 'Nested Loop':
+        assert len(plan['Plans']) == 2, "Length of Plans is more than two."
         if 'Join Filter' in plan:
             nc.inc_p()
             yield {
@@ -77,9 +79,15 @@ def transverse_plan(plan):
                 'Subtype': plan['Node Type'],
                 'Filter': plan['Join Filter'],
             }
-
-        # else can try heuristic to recover join condition IF both children are scan
-        assert len(plan['Plans']) == 2, "Length of Plans is more than two."
+        else:   # else can try heuristic to recover join condition IF both children are scan
+            nc.inc_p()
+            yield {
+                'Type': 'Join',
+                'Subtype': plan['Node Type'],
+                'Filter': '',                                   # can also not include
+                'Possible LHS': plan['Plans'][0]['Output'],
+                'Possible RHS': plan['Plans'][1]['Output'],
+            }
         yield from transverse_plan(plan['Plans'][0])
         yield from transverse_plan(plan['Plans'][1])
     elif plan['Node Type'] == 'Hash Join':
@@ -129,25 +137,40 @@ def transverse_plan(plan):
             yield from transverse_plan(p)
 
 
-def transverse_query(query, plan):
+def transverse_query(query: dict, plan: dict):
+    conj_ops = {'and', 'or'}
     nc = NodeCoverage()
     # TODO: have to first check whether ann already exist or not, act accordingly
-    for result in transverse_plan(plan[0][0]['Plan']):
+    for result in transverse_plan(plan):  # iterate over node in root
         if result['Type'] == 'Join':  # look at WHERE
-            assert len(query['where'].keys()) == 1, "dict where len > 1"
-            conj_ops = ['and', 'or']
-            for conj_op in conj_ops:
-                if conj_op in query['where'].keys():
-                    for sub_cond in query['where'][conj_op]:
+            # TODO: does not cover NOT
+            assert len(query['where'].keys() - {'ann'}) == 1, "dict where len > 1"  # TODO: TEMP FIX
+            if result['Filter'] == '':
+                possible_cond = []
+                for cond in [f'{x} = {y}' for x in result['Possible LHS'] for y in result['Possible RHS']]:
+                    if conj_op := conj_ops.intersection(query['where'].keys()):
+                        for sub_cond in query['where'][conj_op.pop()]:
+                            if compare_condition(sub_cond, cond):
+                                nc.inc_q()
+                                sub_cond['ann'] = f"{result['Subtype']} on {cond}"
+                                possible_cond.append(sub_cond)
+                    else:
+                        if compare_condition(query['where'], result['Filter']):
+                            nc.inc_q()
+                            query['where']['ann'] = f"{result['Subtype']} on {cond}"
+                            possible_cond.append(query['where'])
+                assert len(possible_cond) <= 1, "MORE THAN ONE POSSIBLE CONDITION"
+            else:
+                if conj_op := conj_ops.intersection(query['where'].keys()):
+                    for sub_cond in query['where'][conj_op.pop()]:
                         if compare_condition(sub_cond, result['Filter']):
                             nc.inc_q()
                             sub_cond['ann'] = f"{result['Subtype']} on {result['Filter']}"
                             break
-                    break
-            else:
-                if compare_condition(query['where'], result['Filter']):
-                    nc.inc_q()
-                    query['where']['ann'] = f"{result['Subtype']} on {result['Filter']}"
+                else:
+                    if compare_condition(query['where'], result['Filter']):
+                        nc.inc_q()
+                        query['where']['ann'] = f"{result['Subtype']} on {result['Filter']}"
         elif result['Type'] == 'Scan':  # look at FROM
             # goto from
             if type(query['from']) is str:
@@ -173,7 +196,8 @@ def transverse_query(query, plan):
                             break
                     else:
                         if type(rel['value']) is dict:
-                            continue  # TODO: subquery not supported for now
+                            transverse_query(rel['value'], plan)
+                            continue
                         assert type(rel['value']) is str
                         if rel['value'] == result['Name'] and rel['name'] == result['Alias']:
                             nc.inc_q()
@@ -181,15 +205,12 @@ def transverse_query(query, plan):
                             break
             # if filter exist, goto where
             if result['Filter'] != '':
-                assert len(query['where'].keys()) == 1, "dict where len > 1"
-                conj_ops = ['and', 'or']
-                for conj_op in conj_ops:
-                    if conj_op in query['where'].keys():
-                        for sub_cond in query['where'][conj_op]:
-                            if compare_condition(sub_cond, result['Filter']):
-                                nc.inc_q()
-                                sub_cond['ann'] = f"{result['Subtype']} {result['Name']} Filter on {result['Filter']}"
-                        break
+                assert len(query['where'].keys() - {'ann'}) == 1, "dict where len > 1"  # TODO: TEMP FIX
+                if conj_op := conj_ops.intersection(query['where'].keys()):
+                    for sub_cond in query['where'][conj_op.pop()]:
+                        if compare_condition(sub_cond, result['Filter']):
+                            nc.inc_q()
+                            sub_cond['ann'] = f"{result['Subtype']} {result['Name']} Filter on {result['Filter']}"
                 else:
                     if compare_condition(query['where'], result['Filter']):
                         nc.inc_q()
@@ -216,6 +237,7 @@ def process(conn, query):
     plan = get_query_execution_plan(cur, query)
     parsed_query = parse(query)
     transverse_query(parsed_query, plan)
+    # TODO: convert parsed_query to line-break separated query and annotation
     return "QUERY", "ANN"
 
 
@@ -253,7 +275,7 @@ def main():
         logging.debug(query)
         plan = get_query_execution_plan(cur, query)
         parsed_query = parse(query)
-        transverse_query(parsed_query, plan)
+        transverse_query(parsed_query, plan[0][0]['Plan'])
         pprint(parsed_query, sort_dicts=False)
         pprint(plan, sort_dicts=False)
         print()
