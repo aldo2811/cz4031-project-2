@@ -1,6 +1,7 @@
 import logging
 import os
-from pprint import pprint
+import typing
+from pprint import pprint, pformat
 
 import psycopg2
 from dotenv import load_dotenv
@@ -29,12 +30,15 @@ def get_query_execution_plan(cursor, sql_query):
     return cursor.fetchone()
 
 
-def convert_query_cond_to_plan_like_cond(query_cond):
+def convert_query_cond_to_plan_like_cond(query_cond: dict) -> (str, str):
     """
     convert condition from parsed query to be like plan condition
     :param query_cond:
     :return:
     """
+    def f(a) -> str:
+        return f"'{str(a['literal'])}" if a is dict else str(a)
+
     comp_ops = {
         'gt': (' > ', ' < '),
         'lt': (' < ', ' > '),
@@ -48,22 +52,22 @@ def convert_query_cond_to_plan_like_cond(query_cond):
         if comp_op in query_cond:
             assert len(query_cond[comp_op]) == 2
             return \
-                comp_op_rep[0].join(map(str, query_cond[comp_op])), \
-                comp_op_rep[1].join(map(str, reversed(query_cond[comp_op])))
+                comp_op_rep[0].join(map(f, query_cond[comp_op])), \
+                comp_op_rep[1].join(map(f, reversed(query_cond[comp_op])))
+    raise NotImplementedError(f'{query_cond.keys()}')
 
 
 def compare_condition(query_cond, plan_cond) -> bool:
     """Compares between condition from a parsed query and condition from a plan.
     This is needed because the format between the two is very different.
     It returns true if the query condition is a subset of the plan condition.
-    Example of query_cond:
-    'where': {'and': [{'gt': ['n.n_nationkey', 7]},
-                       {'lt': ['n.n_nationkey', 15]},
-                       {'eq': ['n.n_regionkey', 'r.r_regionkey']},
-                       {'eq': ['c.c_nationkey', 'n.n_nationkey']}]}
-    Example of plan_cond:
-    - '(c.c_nationkey = n.n_nationkey)'
-    - '((n.n_nationkey > 7) AND (n.n_nationkey < 15))'
+
+    Example of query_cond: {'gt': ['n.n_nationkey', 7]}
+
+    Example of plan_cond: '((n.n_nationkey > 7) AND (n.n_nationkey < 15))'
+    :param query_cond:
+    :param plan_cond:
+    :return:
     """
     logging.debug(query_cond)
     logging.debug(plan_cond)
@@ -82,12 +86,12 @@ def transverse_plan(plan):
                 'Subtype': plan['Node Type'],
                 'Filter': plan['Join Filter'],
             }
-        else:   # else can try heuristic to recover join condition IF both children are scan
+        else:  # else can try heuristic to recover join condition IF both children are scan
             nc.inc_p()
             yield {
                 'Type': 'Join',
                 'Subtype': plan['Node Type'],
-                'Filter': '',                                   # can also not include
+                'Filter': '',  # can also not include
                 'Possible LHS': plan['Plans'][0]['Output'],
                 'Possible RHS': plan['Plans'][1]['Output'],
             }
@@ -140,15 +144,16 @@ def transverse_plan(plan):
             yield from transverse_plan(p)
 
 
-def transverse_query(query: dict, plan: dict):
+def find_query_node(query: dict, result: dict):
+    logging.debug(f'find_query_node|query={query}, result={result}')
     conj_ops = {'and', 'or'}
     nc = NodeCoverage()
-    # TODO: have to first check whether ann already exist or not, act accordingly
-    for result in transverse_plan(plan):  # iterate over node in root
-        if result['Type'] == 'Join':  # look at WHERE
-            # TODO: does not cover NOT
+    if result['Type'] == 'Join':  # look at WHERE
+        # TODO: does not cover NOT
+        if 'where' in query:
             assert len(query['where'].keys() - {'ann'}) == 1, "dict where len > 1"  # TODO: TEMP FIX
             if result['Filter'] == '':
+                # For Nested Loop without explicit Filter, we try to find the condition by matching column names
                 possible_cond = []
                 for cond in [f'{x} = {y}' for x in result['Possible LHS'] for y in result['Possible RHS']]:
                     if conj_op := conj_ops.intersection(query['where'].keys()):
@@ -174,50 +179,63 @@ def transverse_query(query: dict, plan: dict):
                     if compare_condition(query['where'], result['Filter']):
                         nc.inc_q()
                         query['where']['ann'] = f"{result['Subtype']} on {result['Filter']}"
-        elif result['Type'] == 'Scan':  # look at FROM
-            # goto from
-            if type(query['from']) is str:
-                if query['from'] == result['Name'] and query['from'] == result['Alias']:
-                    nc.inc_q()
-                    query['from'] = {
-                        'value': query['from'],
-                        'ann': f"{result['Subtype']} {result['Name']}"
-                    }
-            elif type(query['from']) is dict:
-                if query['from']['value'] == result['Name'] and query['from'].get('name', '') == result['Alias']:
-                    nc.inc_q()
-                    query['from']['ann'] = f"{result['Subtype']} {result['Name']} as {result['Alias']}"
-            elif type(query['from']) is list:
-                for i, rel in enumerate(query['from']):
-                    if type(rel) is str:
-                        if rel == result['Name'] and rel == result['Alias']:
-                            nc.inc_q()
-                            query['from'][i] = {
-                                'value': rel,
-                                'ann': f"{result['Subtype']} {result['Name']}"
-                            }
-                            break
-                    else:
-                        if type(rel['value']) is dict:
-                            transverse_query(rel['value'], plan)
-                            continue
-                        assert type(rel['value']) is str
-                        if rel['value'] == result['Name'] and rel.get('name', '') == result['Alias']:
-                            nc.inc_q()
-                            rel['ann'] = f"{result['Subtype']} {result['Name']} as {result['Alias']}"
-                            break
-            # if filter exist, goto where
-            if result['Filter'] != '':
-                assert len(query['where'].keys() - {'ann'}) == 1, "dict where len > 1"  # TODO: TEMP FIX
-                if conj_op := conj_ops.intersection(query['where'].keys()):
-                    for sub_cond in query['where'][conj_op.pop()]:
-                        if compare_condition(sub_cond, result['Filter']):
-                            nc.inc_q()
-                            sub_cond['ann'] = f"{result['Subtype']} {result['Name']} Filter on {result['Filter']}"
-                else:
-                    if compare_condition(query['where'], result['Filter']):
+        # TODO: return when annotated already
+        if type(query['from']) is dict and type(query['from']['value']) is dict:
+            find_query_node(query['from']['value'], result)
+        if type(query['from']) is list:
+            for v in query['from']:
+                if type(v) is dict and type(v['value']) is dict:
+                    find_query_node(v['value'], result)
+    elif result['Type'] == 'Scan':  # look at FROM
+        # goto from
+        if type(query['from']) is str:
+            if query['from'] == result['Name'] and query['from'] == result['Alias']:
+                nc.inc_q()
+                query['from'] = {
+                    'value': query['from'],
+                    'ann': f"{result['Subtype']} {result['Name']}"
+                }
+        elif type(query['from']) is dict:
+            if query['from']['value'] == result['Name'] and query['from'].get('name', '') == result['Alias']:
+                nc.inc_q()
+                query['from']['ann'] = f"{result['Subtype']} {result['Name']} as {result['Alias']}"
+        elif type(query['from']) is list:
+            for i, rel in enumerate(query['from']):
+                if type(rel) is str:
+                    if rel == result['Name'] and rel == result['Alias']:
                         nc.inc_q()
-                        query['where']['ann'] = f"{result['Subtype']} {result['Name']} Filter on {result['Filter']}"
+                        query['from'][i] = {
+                            'value': rel,
+                            'ann': f"{result['Subtype']} {result['Name']}"
+                        }
+                        break
+                else:
+                    if type(rel['value']) is dict:
+                        find_query_node(rel['value'], result)
+                        continue
+                    assert type(rel['value']) is str
+                    if rel['value'] == result['Name'] and rel.get('name', '') == result['Alias']:
+                        nc.inc_q()
+                        rel['ann'] = f"{result['Subtype']} {result['Name']} as {result['Alias']}"
+                        break
+        # if filter exist, goto where
+        if result['Filter'] != '':
+            assert len(query['where'].keys() - {'ann'}) == 1, "dict where len > 1"  # TODO: TEMP FIX
+            if conj_op := conj_ops.intersection(query['where'].keys()):
+                for sub_cond in query['where'][conj_op.pop()]:
+                    if compare_condition(sub_cond, result['Filter']):
+                        nc.inc_q()
+                        sub_cond['ann'] = f"{result['Subtype']} {result['Name']} Filter on {result['Filter']}"
+            else:
+                if compare_condition(query['where'], result['Filter']):
+                    nc.inc_q()
+                    query['where']['ann'] = f"{result['Subtype']} {result['Name']} Filter on {result['Filter']}"
+
+
+def transverse_query(query: dict, plan: dict):
+    # TODO: have to first check whether ann already exist or not, act accordingly
+    for result in transverse_plan(plan):  # iterate over node in root
+        find_query_node(query, result)
 
 
 def init_conn(db_name=None):
@@ -244,8 +262,72 @@ def process(conn, query):
     return "QUERY", "ANN"
 
 
-def preprocess_query(query):
+def preprocess_query_string(query):
     return ' '.join([word.lower() if word[0] != '"' and word[0] != "'" else word for word in query.split()])
+
+
+def collect_relation_list(query_tree, rel_list):
+    if type(query_tree['from']) is str:
+        rel_list.append(query_tree['from'])
+    elif type(query_tree['from']) is dict:
+        if type(query_tree['from']['value']) is str:
+            rel_list.append(query_tree['from']['value'])
+        elif type(query_tree['from']['value']) is dict:
+            collect_relation_list(query_tree['from']['value'], rel_list)
+        else:
+            raise NotImplementedError(f"{query_tree['from']['value']}")
+    elif type(query_tree['from']) is list:
+        for rel in query_tree['from']:
+            if type(rel) is str:
+                rel_list.append(rel)
+            elif type(rel) is dict:
+                if type(rel['value']) is str:
+                    rel_list.append(rel['value'])
+                elif type(rel['value']) is dict:
+                    collect_relation_list(rel['value'], rel_list)
+                else:
+                    raise NotImplementedError(f"{rel['value']}")
+
+
+def rename_column_to_full_name(query_tree: typing.Union[dict, list], column_relation_dict: dict):
+    if type(query_tree) is dict:
+        for key, val in query_tree.items():
+            if key in ['literal', 'interval']:
+                continue
+            if type(val) is str:
+                if '.' not in val and val in column_relation_dict and len(column_relation_dict[val]) == 1:
+                    query_tree[key] = f'{column_relation_dict[val][0]}.{val}'
+            elif type(val) is not int:
+                rename_column_to_full_name(val, column_relation_dict)
+    elif type(query_tree) is list:
+        for i, v in enumerate(query_tree):
+            if type(v) is str:
+                if '.' not in v and v in column_relation_dict and len(column_relation_dict[v]) == 1:
+                    query_tree[i] = f'{column_relation_dict[v][0]}.{v}'
+            elif type(v) is not int:
+                rename_column_to_full_name(v, column_relation_dict)
+    else:
+        raise NotImplementedError(f"{query_tree['where']}")
+
+
+def preprocess_query_tree(cur, query_tree):
+    rel_list = []
+    column_relation_dict = {}
+    collect_relation_list(query_tree, rel_list)
+    logging.debug(f'rel_list={rel_list}')
+    # Collect column info
+    for rel in rel_list:
+        cur.execute(f"SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name = '{rel}'")
+        res = cur.fetchall()
+        # pprint(res)
+        for col in res:
+            if col in column_relation_dict:
+                column_relation_dict[col[0]].append(rel)
+            else:
+                column_relation_dict[col[0]] = [rel]
+    logging.debug(f'column_relation_dict={column_relation_dict}')
+    # For every column, if no dot, try to find in dict, if multiple relation raise exception, else rename
+    rename_column_to_full_name(query_tree, column_relation_dict)
 
 
 def main():
@@ -261,6 +343,7 @@ def main():
         "SELECT * FROM nation, region WHERE nation.n_regionkey < region.r_regionkey and nation.n_regionkey = 0;",
         "SELECT * FROM nation;",
         'select N_NATIONKey, "n_regionkey" from NATion;',
+        'select N_NATIONKey from NATion;',
         "SELECT * FROM nation as n1, nation as n2 WHERE n1.n_regionkey = n2.n_regionkey;",
         "SELECT * FROM nation as n1, nation as n2 WHERE n1.n_regionkey < n2.n_regionkey;",
         "SELECT * FROM nation as n1, nation as n2 WHERE n1.n_regionkey <> n2.n_regionkey;",
@@ -299,16 +382,26 @@ LIMIT 100;""",
 
     for query in queries:
         print("==========================")
-        query = preprocess_query(query)   # assume all queries are case insensitive
+        query = preprocess_query_string(query)  # assume all queries are case insensitive
         logging.debug(query)
         plan = get_query_execution_plan(cur, query)
         parsed_query = parse(query)
-        transverse_query(parsed_query, plan[0][0]['Plan'])
-        pprint(parsed_query, sort_dicts=False)
-        pprint(plan, sort_dicts=False)
+        try:
+            preprocess_query_tree(cur, parsed_query)
+            transverse_query(parsed_query, plan[0][0]['Plan'])
+        except Exception as e:
+            logging.error(e, exc_info=True)
+            logging.debug(pformat(query))
+            logging.debug(pformat(parsed_query))
+            logging.debug(pformat(plan))
+            raise e
+        else:
+            pprint(parsed_query, sort_dicts=False)
+            pprint(plan, sort_dicts=False)
         print()
 
     print(nc)
+    cur.close()
 
 
 if __name__ == '__main__':
