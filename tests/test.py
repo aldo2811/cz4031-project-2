@@ -14,6 +14,8 @@ from annotation import *
     "SELECT * FROM nation as n1, nation as n2 WHERE n1.n_regionkey <> n2.n_regionkey;",
     "SELECT * FROM nation as n WHERE 0 < n.n_regionkey  and n.n_regionkey < 3;",
     "SELECT * FROM nation as n WHERE 0 < n.n_nationkey  and n.n_nationkey < 30;",
+    "SELECT * FROM nation WHERE n_nationkey = (SELECT max(n_nationkey) FROM nation);",
+    "SELECT * FROM supplier WHERE s_nationkey IN (SELECT n_nationkey FROM nation WHERE n_regionkey = 3);",
     "SELECT n.n_nationkey FROM nation as n WHERE 0 < n.n_nationkey  and n.n_nationkey < 30;",
     "SELECT * FROM customer as c, (SELECT * FROM nation as n where n.n_nationkey > 7 and n.n_nationkey < 15) as n, region as r WHERE n.n_regionkey = r.r_regionkey  and c.c_nationkey = n.n_nationkey;",
     "SELECT * FROM customer as c, nation as n, region as r WHERE n.n_nationkey > 7 and n.n_nationkey < 15 and  n.n_regionkey = r.r_regionkey  and c.c_nationkey = n.n_nationkey;",
@@ -44,6 +46,17 @@ PS_SUPPLYCOST = (SELECT MIN(PS_SUPPLYCOST) FROM PARTSUPP, SUPPLIER, NATION, REGI
  AND S_NATIONKEY = N_NATIONKEY AND N_REGIONKEY = R_REGIONKEY AND R_NAME = 'EUROPE')
 ORDER BY S_ACCTBAL DESC, N_NAME, S_NAME, P_PARTKEY
 LIMIT 100;""",
+    """SELECT L_ORDERKEY, SUM(L_EXTENDEDPRICE*(1-L_DISCOUNT)) AS REVENUE, O_ORDERDATE, O_SHIPPRIORITY
+FROM CUSTOMER, ORDERS, LINEITEM
+WHERE C_MKTSEGMENT = 'BUILDING' AND C_CUSTKEY = O_CUSTKEY AND L_ORDERKEY = O_ORDERKEY AND
+O_ORDERDATE < '1995-03-15' AND L_SHIPDATE > '1995-03-15'
+GROUP BY L_ORDERKEY, O_ORDERDATE, O_SHIPPRIORITY
+ORDER BY REVENUE DESC, O_ORDERDATE LIMIT 10""",
+    """SELECT O_ORDERPRIORITY, COUNT(*) AS ORDER_COUNT FROM ORDERS
+WHERE O_ORDERDATE < (date '1993-07-01' + interval '3 day') AND O_ORDERDATE >= date '1993-07-01' 
+AND EXISTS (SELECT * FROM LINEITEM WHERE L_ORDERKEY = O_ORDERKEY AND L_COMMITDATE < L_RECEIPTDATE)
+GROUP BY O_ORDERPRIORITY
+ORDER BY O_ORDERPRIORITY;""",
     # Test cases too hard to do
     # "SELECT * FROM nation as n1, (SELECT * FROM nation as n1) as n2 WHERE n1.n_regionkey = n2.n_regionkey;",
     # "SELECT * FROM nation as n1, (SELECT n1.n_regionkey FROM nation as n1) as n2 WHERE n1.n_regionkey = n2.n_regionkey;",
