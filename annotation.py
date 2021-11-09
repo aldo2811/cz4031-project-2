@@ -14,11 +14,13 @@ def import_config():
     db_name = os.getenv("DB_NAME")
     db_uname = os.getenv("DB_UNAME")
     db_pass = os.getenv("DB_PASS")
-    return db_name, db_uname, db_pass
+    db_host = os.getenv("DB_HOST")
+    db_port = os.getenv("DB_PORT")
+    return db_name, db_uname, db_pass, db_host, db_port
 
 
-def open_db(db_name, db_uname, db_pass):
-    conn = psycopg2.connect(database=db_name, user=db_uname, password=db_pass)
+def open_db(db_name, db_uname, db_pass, db_host, db_port):
+    conn = psycopg2.connect(database=db_name, user=db_uname, password=db_pass, host=db_host, port=db_port)
     return conn
 
 
@@ -220,10 +222,10 @@ def transverse_query(query: dict, plan: dict):
 
 def init_conn(db_name=None):
     if db_name is None:
-        db_name, db_uname, db_pass = import_config()
+        db_name, db_uname, db_pass, db_host, db_port = import_config()
     else:
-        _, db_uname, db_pass = import_config()
-    conn = open_db(db_name, db_uname, db_pass)
+        _, db_uname, db_pass, db_host, db_port = import_config()
+    conn = open_db(db_name, db_uname, db_pass, db_host, db_port)
     return conn
 
 
@@ -249,8 +251,8 @@ def preprocess_query(query):
 def main():
     nc = NodeCoverage()
     logging.basicConfig(filename='log/debug.log', filemode='w', level=logging.DEBUG)
-    db_name, db_uname, db_pass = import_config()
-    conn = open_db(db_name, db_uname, db_pass)
+    db_name, db_uname, db_pass, db_host, db_port = import_config()
+    conn = open_db(db_name, db_uname, db_pass, db_host, db_port)
     cur = conn.cursor()
 
     queries = [
