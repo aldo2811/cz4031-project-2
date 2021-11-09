@@ -40,6 +40,7 @@ def convert_query_cond_to_plan_like_cond(query_cond):
         'neq': (' <> ', ' <> '),
         'gte': (' >= ', ' <= '),
         'lte': (' <= ', ' >= '),
+        'like': (' LIKE ', ' LIKE '),
     }
     for comp_op, comp_op_rep in comp_ops.items():
         if comp_op in query_cond:
@@ -181,7 +182,7 @@ def transverse_query(query: dict, plan: dict):
                         'ann': f"{result['Subtype']} {result['Name']}"
                     }
             elif type(query['from']) is dict:
-                if query['from']['value'] == result['Name'] and query['from']['name'] == result['Alias']:
+                if query['from']['value'] == result['Name'] and query['from'].get('name', '') == result['Alias']:
                     nc.inc_q()
                     query['from']['ann'] = f"{result['Subtype']} {result['Name']} as {result['Alias']}"
             elif type(query['from']) is list:
@@ -199,7 +200,7 @@ def transverse_query(query: dict, plan: dict):
                             transverse_query(rel['value'], plan)
                             continue
                         assert type(rel['value']) is str
-                        if rel['value'] == result['Name'] and rel['name'] == result['Alias']:
+                        if rel['value'] == result['Name'] and rel.get('name', '') == result['Alias']:
                             nc.inc_q()
                             rel['ann'] = f"{result['Subtype']} {result['Name']} as {result['Alias']}"
                             break
@@ -241,6 +242,10 @@ def process(conn, query):
     return "QUERY", "ANN"
 
 
+def preprocess_query(query):
+    return ' '.join([word.lower() if word[0] != '"' and word[0] != "'" else word for word in query.split()])
+
+
 def main():
     nc = NodeCoverage()
     logging.basicConfig(filename='log/debug.log', filemode='w', level=logging.DEBUG)
@@ -253,6 +258,7 @@ def main():
         "SELECT * FROM nation, region WHERE nation.n_regionkey = region.r_regionkey and nation.n_regionkey = 0;",
         "SELECT * FROM nation, region WHERE nation.n_regionkey < region.r_regionkey and nation.n_regionkey = 0;",
         "SELECT * FROM nation;",
+        'select N_NATIONKey, "n_regionkey" from NATion;',
         "SELECT * FROM nation as n1, nation as n2 WHERE n1.n_regionkey = n2.n_regionkey;",
         "SELECT * FROM nation as n1, nation as n2 WHERE n1.n_regionkey < n2.n_regionkey;",
         "SELECT * FROM nation as n1, nation as n2 WHERE n1.n_regionkey <> n2.n_regionkey;",
@@ -265,6 +271,25 @@ def main():
         "SELECT * FROM customer as c, (SELECT * FROM nation as n where n.n_regionkey<5) as n, region as r WHERE n.n_regionkey = r.r_regionkey  and c.c_nationkey = n.n_nationkey;",
         "SELECT  DISTINCT c.c_custkey FROM customer as c, (SELECT * FROM nation as n where n.n_regionkey=0) as n, region as r WHERE n.n_regionkey = r.r_regionkey  and c.c_nationkey = n.n_nationkey;",
 
+        # http://www.qdpma.com/tpch/TPCH100_Query_plans.html
+        """SELECT L_RETURNFLAG, L_LINESTATUS, SUM(L_QUANTITY) AS SUM_QTY,
+ SUM(L_EXTENDEDPRICE) AS SUM_BASE_PRICE, SUM(L_EXTENDEDPRICE*(1-L_DISCOUNT)) AS SUM_DISC_PRICE,
+ SUM(L_EXTENDEDPRICE*(1-L_DISCOUNT)*(1+L_TAX)) AS SUM_CHARGE, AVG(L_QUANTITY) AS AVG_QTY,
+ AVG(L_EXTENDEDPRICE) AS AVG_PRICE, AVG(L_DISCOUNT) AS AVG_DISC, COUNT(*) AS COUNT_ORDER
+FROM LINEITEM
+WHERE L_SHIPDATE <= date '1998-12-01' + interval '-90 day'
+GROUP BY L_RETURNFLAG, L_LINESTATUS
+ORDER BY L_RETURNFLAG,L_LINESTATUS""",
+        """SELECT S_ACCTBAL, S_NAME, N_NAME, P_PARTKEY, P_MFGR, S_ADDRESS, S_PHONE, S_COMMENT
+FROM PART, SUPPLIER, PARTSUPP, NATION, REGION
+WHERE P_PARTKEY = PS_PARTKEY AND S_SUPPKEY = PS_SUPPKEY AND P_SIZE = 15 AND
+P_TYPE LIKE '%%BRASS' AND S_NATIONKEY = N_NATIONKEY AND N_REGIONKEY = R_REGIONKEY AND
+R_NAME = 'EUROPE' AND
+PS_SUPPLYCOST = (SELECT MIN(PS_SUPPLYCOST) FROM PARTSUPP, SUPPLIER, NATION, REGION
+ WHERE P_PARTKEY = PS_PARTKEY AND S_SUPPKEY = PS_SUPPKEY
+ AND S_NATIONKEY = N_NATIONKEY AND N_REGIONKEY = R_REGIONKEY AND R_NAME = 'EUROPE')
+ORDER BY S_ACCTBAL DESC, N_NAME, S_NAME, P_PARTKEY
+LIMIT 100;""",
         # Test cases too hard to do
         # "SELECT * FROM nation as n1, (SELECT * FROM nation as n1) as n2 WHERE n1.n_regionkey = n2.n_regionkey;",
         # "SELECT * FROM nation as n1, (SELECT n1.n_regionkey FROM nation as n1) as n2 WHERE n1.n_regionkey = n2.n_regionkey;",
@@ -272,6 +297,7 @@ def main():
 
     for query in queries:
         print("==========================")
+        query = preprocess_query(query)   # assume all queries are case insensitive
         logging.debug(query)
         plan = get_query_execution_plan(cur, query)
         parsed_query = parse(query)
