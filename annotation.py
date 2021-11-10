@@ -463,6 +463,7 @@ def reparse_statement(formatted_list: list, parent_key: str, child_query: any, i
             annotation = child_query['ann']
             try:
                 format(child_query)
+                # if query can be formatted here, it must be {value: ...} format
                 value_str = child_query['value']
                 if not is_last_child:
                     value_str += ','
@@ -470,9 +471,11 @@ def reparse_statement(formatted_list: list, parent_key: str, child_query: any, i
             except:
                 del child_query['ann']
                 try:
+                    # try to format query after deleting annotation key
                     formatted_statement = format(child_query)
                     formatted_list.append(format_query(formatted_statement, parent_ann=annotation))
                 except:
+                    # failure to format means there are other annotations in the query
                     key = list(child_query.keys())[0]
                     reparse_statement(formatted_list, key, child_query[key], is_parent_operation=True, parent_ann=annotation)
         else:
@@ -484,10 +487,20 @@ def reparse_statement(formatted_list: list, parent_key: str, child_query: any, i
                         value += ','
                     formatted_list.append(format_query(value))
                 else:
+                    # must be an operation
                     reparse_statement(formatted_list, key, child_query[key], is_parent_operation=True)
-            else:
+            elif 'select' in child_query.keys():
                 temp = reparse(child_query)
                 formatted_list.extend(temp)
+            else:
+                try:
+                    formatted_child = format(child_query)
+                    formatted_list.append(format_query(formatted_child))
+                except:
+                    print('******************')
+                    pprint(child_query)
+                    print('******************')
+
 
     elif type(child_query) is list:
         for i, child in enumerate(child_query):
@@ -779,11 +792,7 @@ def reparse_select_keyword(formatted_query: list, identifier: any, last_identifi
         temp.append(format_query(identifier))
     elif type(identifier) is dict:
         if type(identifier['value']) is str:
-            name = get_name(identifier['value'])
             statement = identifier['value']
-
-            if name is not None:
-                statement += ' AS ' + name
 
             if not last_identifier:
                 statement += ','
@@ -791,8 +800,16 @@ def reparse_select_keyword(formatted_query: list, identifier: any, last_identifi
         elif type(identifier['value']) is dict:
             keyword_op = find_keyword_operation(identifier['value'])
             if keyword_op is not None:
-                subquery = reparse_keyword_operation(identifier['value'], keyword_op, comma=not last_identifier)
-                temp.extend(subquery)
+                if 'name' in identifier:
+                    subquery = reparse_keyword_operation(identifier['value'], keyword_op)
+                    temp.extend(subquery)
+                    name_str = 'AS ' + identifier['name']
+                    if not last_identifier:
+                        name_str += ','
+                    temp.append(format_query(name_str))
+                else:
+                    subquery = reparse_keyword_operation(identifier['value'], keyword_op, comma=not last_identifier)
+                    temp.extend(subquery)
     elif type(identifier) is list:
         for i, single_identifier in enumerate(identifier):
             reparse_select_keyword(temp, single_identifier, i == len(identifier) - 1)
@@ -938,6 +955,8 @@ LIMIT 100;""",
         try:
             preprocess_query_tree(cur, parsed_query)
             transverse_query(parsed_query, plan[0][0]['Plan'])
+            result = []
+            reparse_query(result, parsed_query)
         except Exception as e:
             logging.error(e, exc_info=True)
             logging.debug(pformat(query))
@@ -946,7 +965,7 @@ LIMIT 100;""",
             raise e
         else:
             pprint(parsed_query, sort_dicts=False)
-            pprint(plan, sort_dicts=False)
+            pprint(result)
         print()
 
     print(nc)
