@@ -15,6 +15,7 @@ from annotation import *
     "SELECT * FROM nation as n WHERE 0 < n.n_regionkey  and n.n_regionkey < 3;",
     "SELECT * FROM nation as n WHERE 0 < n.n_nationkey  and n.n_nationkey < 30;",
     "SELECT * FROM nation WHERE n_nationkey = (SELECT max(n_nationkey) FROM nation);",
+    "SELECT * FROM nation WHERE (SELECT max(n_nationkey) FROM nation) = n_nationkey;",
     "SELECT * FROM supplier WHERE s_nationkey IN (SELECT n_nationkey FROM nation WHERE n_regionkey = 3);",
     "SELECT n.n_nationkey FROM nation as n WHERE 0 < n.n_nationkey  and n.n_nationkey < 30;",
     "SELECT * FROM customer as c, (SELECT * FROM nation as n where n.n_nationkey > 7 and n.n_nationkey < 15) as n, region as r WHERE n.n_regionkey = r.r_regionkey  and c.c_nationkey = n.n_nationkey;",
