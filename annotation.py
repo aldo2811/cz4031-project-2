@@ -5,7 +5,7 @@ from pprint import pprint, pformat
 
 import psycopg2
 from dotenv import load_dotenv
-from mo_sql_parsing import parse
+from mo_sql_parsing import parse, format
 
 from util import NodeCoverage
 
@@ -423,6 +423,460 @@ def preprocess_query_tree(cur, query_tree):
     logging.debug(f'column_relation_dict={column_relation_dict}')
     # For every column, if no dot, try to find in dict, if multiple relation raise exception, else rename
     rename_column_to_full_name(query_tree, column_relation_dict)
+
+
+def op_to_symbol(op: str):
+    arit_ops = {'mul': '*', 'sub': '-', 'add': '+'}
+    conj_ops = {'and', 'or'}
+    comp_ops = {
+        'gt': '>',
+        'lt': '<',
+        'eq': '=',
+        'neq': '<>',
+        'gte': '>=',
+        'lte': '<=',
+        'like': 'LIKE',
+    }
+
+    if op in arit_ops.keys():
+        return arit_ops[op]
+    elif op in comp_ops.keys():
+        return comp_ops[op]
+    elif op in conj_ops:
+        return op.upper()
+    else:
+        return op
+
+
+def reparse(parsed_query: dict):
+    formatted_list = []
+    for key in parsed_query.keys():
+        formatted_list.append(format_query(key.upper()))
+        reparse_statement(formatted_list, key, parsed_query[key], is_parent_operation=False)
+
+    return formatted_list
+
+
+def reparse_statement(formatted_list: list, parent_key: str, child_query: any, is_parent_operation: bool, is_last_child: bool = True, parent_ann: str = None):
+    if type(child_query) is dict:
+        if 'ann' in child_query:
+            annotation = child_query['ann']
+            try:
+                format(child_query)
+                value_str = child_query['value']
+                if not is_last_child:
+                    value_str += ','
+                formatted_list.append(format_query(value_str, child_query['ann']))
+            except:
+                del child_query['ann']
+                try:
+                    formatted_statement = format(child_query)
+                    formatted_list.append(format_query(formatted_statement, parent_ann=annotation))
+                except:
+                    key = list(child_query.keys())[0]
+                    reparse_statement(formatted_list, key, child_query[key], is_parent_operation=True, parent_ann=annotation)
+        else:
+            if len(child_query.keys()) == 1:
+                key = list(child_query.keys())[0]
+                if key == 'value':
+                    value = child_query['value']
+                    if not is_last_child:
+                        value += ','
+                    formatted_list.append(format_query(value))
+                else:
+                    reparse_statement(formatted_list, key, child_query[key], is_parent_operation=True)
+            else:
+                temp = reparse(child_query)
+                formatted_list.extend(temp)
+
+    elif type(child_query) is list:
+        for i, child in enumerate(child_query):
+            reparse_statement(formatted_list, parent_key, child, is_parent_operation, i == len(child_query) - 1, parent_ann)
+            if i < len(child_query) - 1:
+                if is_parent_operation:
+                    formatted_list.append(format_query(op_to_symbol(parent_key)))
+    elif type(child_query) is str or type(child_query) is int:
+        child_query_str = str(child_query)
+        if not is_last_child and not is_parent_operation:
+            child_query_str += ','
+        formatted_list.append(format_query(child_query_str))
+    # if type(child_query) is dict:
+    #     if 'ann' in child_query:
+    #         annotation = child_query['ann']
+    #         del child_query['ann']
+    #         formatted_statement = format(child_query)
+    #         formatted_list.append(format_query(formatted_statement, annotation))
+    #     else:
+    #         try:
+    #             formatted_statement = format(child_query)
+    #             formatted_list.append(format_query(formatted_statement))
+    #         except:
+    #             for child_key in child_query.keys():
+    #                 reparse_statement(formatted_list, child_key, child_query[child_key])
+    # elif type(child_query) is list:
+    #     arit_ops = {'mul': '*', 'sub': '-', 'add': '+'}
+    #     conj_ops = {'and', 'or'}
+    #     comp_ops = {
+    #         'gt': '>',
+    #         'lt': '<',
+    #         'eq': '=',
+    #         'neq': '<>',
+    #         'gte': '>=',
+    #         'lte': '<=',
+    #         'like': 'LIKE',
+    #     }
+    #
+    #     for i, child in enumerate(child_query):
+    #         reparse_statement(formatted_list, parent_key, child)
+    #         if i < len(child_query) - 1:
+    #             if parent_key in arit_ops:
+    #                 operator = arit_ops[parent_key]
+    #                 formatted_list.append(format_query(operator))
+    #             elif parent_key in conj_ops:
+    #                 operator = parent_key.upper()
+    #                 formatted_list.append(format_query(operator))
+    #             elif parent_key in comp_ops:
+    #                 operator = comp_ops[parent_key]
+    #                 formatted_list.append(format_query(operator))
+    # elif type(child_query) is str or type(child_query) is int:
+    #     formatted_list.append(format_query(format(child_query)))
+
+
+def get_annotation(statement_dict):
+    return '' if 'ann' not in statement_dict.keys() else statement_dict['ann']
+
+
+def get_name(statement_dict):
+    return None if 'name' not in statement_dict.keys() else statement_dict['name']
+
+
+def find_keyword_operation(statement_dict: dict):
+    keyword_ops = {'sum', 'count', 'avg', 'coalesce', 'min', 'max'}
+    for op in keyword_ops:
+        if op in statement_dict.keys():
+            return op
+    return None
+
+
+def find_arithmetic_operation(statement_dict: dict):
+    symbol_ops = {'mul', 'sub', 'add'}
+    for op in symbol_ops:
+        if op in statement_dict.keys():
+            return op
+    return None
+
+
+def find_conjunction_operation(statement_dict: dict):
+    conj_ops = {'and', 'or'}
+    for op in conj_ops:
+        if op in statement_dict.keys():
+            return op
+    return None
+
+
+def find_comparison_operation(statement_dict: dict):
+    comp_ops = {
+        'gt',
+        'lt',
+        'eq',
+        'neq',
+        'gte',
+        'lte',
+        'like',
+    }
+    for op in comp_ops:
+        if op in statement_dict.keys():
+            return op
+    return None
+
+
+def find_datetime_operation(statement_dict: dict):
+    datetime_ops = {'date', 'interval', 'time', 'timestamp'}
+    for op in datetime_ops:
+        if op in statement_dict.keys():
+            return op
+    return None
+
+
+def reparse_arithmetic_operation(statement_dict: dict, symbol_op: str):
+    symbol_ops = {'mul': '*', 'sub': '-', 'add': '+'}
+    temp = []
+    operands = statement_dict[symbol_op]
+
+    if type(operands) is list:
+        statement = ''
+        for i, operand in enumerate(operands):
+            if type(operand) is str or type(operand) is int:
+                statement += str(operand)
+            elif type(operand) is dict:
+                arithmetic_op = find_arithmetic_operation(operand)
+                datetime_op = find_datetime_operation(operand)
+                if arithmetic_op is not None:
+                    subquery = reparse_arithmetic_operation(operand, arithmetic_op)
+                    if len(subquery) > 1:
+                        statement += '('
+                        temp.append(format_query(statement))
+                        temp.extend(subquery)
+                        temp.append(format_query(')'))
+                    else:
+                        statement += '(' + subquery[0]['statement'] + ')'
+                        temp.append(format_query(statement, subquery[0]['annotation']))
+
+                    statement = ''
+                elif datetime_op is not None:
+                    subquery = reparse_datetime_operation(operand, datetime_op)
+                    statement += '('
+                    if len(subquery) == 1:
+                        statement += subquery[0]['statement']
+                        statement += ')'
+                        temp.append(format_query(statement))
+                    else:
+                        temp.append(format_query(statement))
+                        temp.extend(subquery)
+                        temp.append(format_query(')'))
+                    statement = ''
+
+            if i < len(operands) - 1:
+                if statement != '':
+                    statement += ' '
+                statement += symbol_ops[symbol_op] + ' '
+
+        if statement != '':
+            temp.append(format_query(statement))
+
+    return temp
+
+
+def reparse_keyword_operation(statement_dict: dict, op: str, comma: bool = False):
+    temp = []
+    operand = statement_dict[op]
+
+    if type(operand) is str:
+        statement = op.upper() + ' (' + operand + ')'
+        if comma:
+            statement += ','
+        temp.append(format_query(statement))
+    elif type(operand) is dict:
+        arithmetic_op = find_arithmetic_operation(operand)
+        if arithmetic_op is not None:
+            temp.append(format_query(op.upper() + ' ('))
+            subquery = reparse_arithmetic_operation(operand, arithmetic_op)
+            temp.extend(subquery)
+            end_statement = ')'
+            if comma:
+                end_statement += ','
+            temp.append(format_query(end_statement))
+
+    return temp
+
+
+def reparse_conjunction_operation(statement_dict: dict, conj_op: str):
+    temp = []
+    operands = statement_dict[conj_op]
+    assert type(operands) is list
+
+    for i, operand in enumerate(operands):
+        arithmetic_op = find_arithmetic_operation(operand)
+        conjunction_op = find_conjunction_operation(operand)
+        comparison_op = find_comparison_operation(operand)
+
+        if arithmetic_op is not None:
+            temp.append(format_query('('))
+            subquery = reparse_arithmetic_operation(operand, arithmetic_op)
+            temp.extend(subquery)
+            temp.append(format_query(')'))
+        elif conjunction_op is not None:
+            temp.append(format_query('('))
+            subquery = reparse_conjunction_operation(operand, conjunction_op)
+            temp.extend(subquery)
+            temp.append(format_query(')'))
+        elif comparison_op is not None:
+            subquery = reparse_comparison_operation(operand, comparison_op)
+            if len(subquery) > 1:
+                temp.append(format_query('('))
+                temp.extend(subquery)
+                temp.append(format_query(')'))
+            else:
+                temp.extend(subquery)
+
+        if i < len(operands) - 1:
+            temp.append(format_query('AND'))
+
+    return temp
+
+
+def reparse_comparison_operation(statement_dict: dict, comp_op: str):
+    comp_ops = {
+        'gt': '>',
+        'lt': '<',
+        'eq': '=',
+        'neq': '<>',
+        'gte': '>=',
+        'lte': '<=',
+        'like': 'LIKE',
+    }
+    temp = []
+    annotation = get_annotation(statement_dict)
+    operands = statement_dict[comp_op]
+
+    if type(operands) is list:
+        statement = ''
+        for i, operand in enumerate(operands):
+            if type(operand) is str or type(operand) is int:
+                statement += str(operand)
+            elif type(operand) is dict:
+                arithmetic_op = find_arithmetic_operation(operand)
+                if 'select' in operand.keys():
+                    statement += '('
+                    temp.append(format_query(statement))
+                    statement = ''
+                    reparse_query(temp, operand)
+                    temp.append(format_query(')'))
+                elif arithmetic_op is not None:
+                    statement += '('
+                    temp.append(format_query(statement))
+                    statement = ''
+                    subquery = reparse_arithmetic_operation(operand, arithmetic_op)
+                    temp.extend(subquery)
+                    temp.append(format_query(')'))
+                elif 'literal' in operand.keys():
+                    statement += "'" + operand['literal'] + "'"
+
+            if i < len(operands) - 1:
+                if statement != '':
+                    statement += ' '
+                statement += comp_ops[comp_op] + ' '
+
+        if statement != '':
+            temp.append(format_query(statement, annotation))
+
+    return temp
+
+
+def reparse_datetime_operation(statement_dict: dict, datetime_op: str):
+    temp = []
+    operand = statement_dict[datetime_op]
+
+    statement = datetime_op.upper()
+    if type(operand) is list:
+        statement += ' '.join([str(o) for o in operand])
+    elif type(operand) is dict:
+        if 'literal' in operand.keys():
+            statement += "'" + operand['literal'] + "'"
+
+    temp.append(format_query(statement))
+    return temp
+
+
+def format_query(statement: str, annotation: str = ''):
+    return {'statement': statement, 'annotation': annotation}
+
+
+def reparse_select_keyword(formatted_query: list, identifier: any, last_identifier: bool = True):
+    temp = []
+
+    if type(identifier) is str:
+        temp.append(format_query(identifier))
+    elif type(identifier) is dict:
+        if type(identifier['value']) is str:
+            name = get_name(identifier['value'])
+            statement = identifier['value']
+
+            if name is not None:
+                statement += ' AS ' + name
+
+            if not last_identifier:
+                statement += ','
+            temp.append(format_query(statement))
+        elif type(identifier['value']) is dict:
+            keyword_op = find_keyword_operation(identifier['value'])
+            if keyword_op is not None:
+                subquery = reparse_keyword_operation(identifier['value'], keyword_op, comma=not last_identifier)
+                temp.extend(subquery)
+    elif type(identifier) is list:
+        for i, single_identifier in enumerate(identifier):
+            reparse_select_keyword(temp, single_identifier, i == len(identifier) - 1)
+
+    formatted_query.extend(temp)
+
+
+def reparse_from_keyword(formatted_query: list, identifier: any, last_identifier: bool = True):
+    temp = []
+
+    if type(identifier) is dict:
+        name = get_name(identifier)
+        annotation = get_annotation(identifier)
+        # TODO: refactor logic
+        end_statement = ''
+
+        if type(identifier['value']) is str:
+            end_statement = identifier['value']
+        elif type(identifier['value']) is dict:
+            temp.append(format_query('('))
+            reparse_query(temp, identifier['value'])
+            end_statement = ')'
+
+        if name is not None:
+            end_statement += ' AS ' + name
+
+        if not last_identifier:
+            end_statement += ','
+        temp.append(format_query(end_statement, annotation))
+    elif type(identifier) is str:
+        statement = identifier
+
+        if not last_identifier:
+            statement += ','
+
+        temp.append(format_query(statement))
+    elif type(identifier) is list:
+        for i, single_identifier in enumerate(identifier):
+            reparse_from_keyword(temp, single_identifier, i == len(identifier) - 1)
+
+    formatted_query.extend(temp)
+
+
+def reparse_where_keyword(formatted_query: list, identifier: any):
+    temp = []
+    assert type(identifier) is dict
+
+    conjunction_op = find_conjunction_operation(identifier)
+    comparison_op = find_comparison_operation(identifier)
+
+    if conjunction_op is not None:
+        subquery = reparse_conjunction_operation(identifier, conjunction_op)
+        temp.extend(subquery)
+    elif comparison_op is not None:
+        subquery = reparse_comparison_operation(identifier, comparison_op)
+        temp.extend(subquery)
+
+    formatted_query.extend(temp)
+
+
+def reparse_query(formatted_query: list, statement_dict: dict):
+    temp = []
+
+    for keyword, identifier in statement_dict.items():
+        if keyword.startswith('select'):
+            select_keyword = 'SELECT'
+            if keyword == 'select_distinct':
+                select_keyword += ' DISTINCT'
+            temp.append(format_query(select_keyword))
+            reparse_select_keyword(temp, identifier)
+        elif keyword == 'from':
+            temp.append(format_query('FROM'))
+            reparse_from_keyword(temp, identifier)
+        elif keyword == 'where':
+            temp.append(format_query('WHERE'))
+            reparse_where_keyword(temp, identifier)
+
+    formatted_query.extend(temp)
+
+
+def annotate_query(parsed_query: dict):
+    formatted_query = []
+    reparse_query(formatted_query, parsed_query)
+    return formatted_query
 
 
 def main():
