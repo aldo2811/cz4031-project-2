@@ -26,6 +26,7 @@ from annotation import *
     "SELECT * FROM (SELECT * FROM nation, region WHERE n_regionkey = r_regionkey) as nr;",
     "SELECT * FROM (SELECT * FROM nation, region WHERE nation.n_regionkey = region.r_regionkey) as nr;",
     "SELECT * FROM customer, nation, region WHERE n_nationkey > 7 and n_nationkey < 15 and  n_regionkey = r_regionkey  and c_nationkey = n_nationkey;",
+    "SELECT * FROM customer, nation, region WHERE c_nationkey = nation.n_nationkey and n_regionkey = region.r_regionkey AND ((r_regionkey = 1 AND c_acctbal > 500) OR (r_regionkey = 2 AND c_acctbal > 700));",
 
     # http://www.qdpma.com/tpch/TPCH100_Query_plans.html
     """SELECT L_RETURNFLAG, L_LINESTATUS, SUM(L_QUANTITY) AS SUM_QTY,
