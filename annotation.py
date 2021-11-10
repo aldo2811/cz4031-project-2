@@ -30,50 +30,6 @@ def get_query_execution_plan(cursor, sql_query):
     return cursor.fetchone()
 
 
-def convert_query_cond_to_plan_like_cond(query_cond: dict) -> (str, str):
-    """
-    convert condition from parsed query to be like plan condition
-    :param query_cond:
-    :return:
-    """
-    def f(a) -> str:
-        return f"'{str(a['literal'])}" if a is dict else str(a)
-
-    comp_ops = {
-        'gt': (' > ', ' < '),
-        'lt': (' < ', ' > '),
-        'eq': (' = ', ' = '),
-        'neq': (' <> ', ' <> '),
-        'gte': (' >= ', ' <= '),
-        'lte': (' <= ', ' >= '),
-        'like': (' LIKE ', ' LIKE '),
-    }
-    for comp_op, comp_op_rep in comp_ops.items():
-        if comp_op in query_cond:
-            assert len(query_cond[comp_op]) == 2
-            return \
-                comp_op_rep[0].join(map(f, query_cond[comp_op])), \
-                comp_op_rep[1].join(map(f, reversed(query_cond[comp_op])))
-    raise NotImplementedError(f'{query_cond.keys()}')
-
-
-def compare_condition(query_cond, plan_cond) -> bool:
-    """Compares between condition from a parsed query and condition from a plan.
-    This is needed because the format between the two is very different.
-    It returns true if the query condition is a subset of the plan condition.
-
-    Example of query_cond: {'gt': ['n.n_nationkey', 7]}
-
-    Example of plan_cond: '((n.n_nationkey > 7) AND (n.n_nationkey < 15))'
-    :param query_cond:
-    :param plan_cond:
-    :return:
-    """
-    logging.debug(query_cond)
-    logging.debug(plan_cond)
-    return any(x in plan_cond for x in convert_query_cond_to_plan_like_cond(query_cond))
-
-
 def transverse_plan(plan):
     nc = NodeCoverage()
     logging.debug(f"now in {plan['Node Type']}")
@@ -107,6 +63,16 @@ def transverse_plan(plan):
         assert len(plan['Plans']) == 2, "Length of Plans is more than two."
         yield from transverse_plan(plan['Plans'][0])
         yield from transverse_plan(plan['Plans'][1])
+    elif plan['Node Type'] == 'Merge Join':
+        nc.inc_p()
+        yield {
+            'Type': 'Join',
+            'Subtype': plan['Node Type'],
+            'Filter': plan['Merge Cond'],
+        }
+
+        for p in plan['Plans']:
+            yield from transverse_plan(p)
     elif plan['Node Type'] == 'Seq Scan':
         nc.inc_p()
         yield {
@@ -116,15 +82,43 @@ def transverse_plan(plan):
             'Alias': plan['Alias'],
             'Filter': plan.get('Filter', ''),
         }
-    elif plan['Node Type'] == 'Index Scan' or plan['Node Type'] == 'Index Only Scan':
+    elif plan['Node Type'] in ['Index Scan', 'Index Only Scan']:
+        def _f():
+            if 'Index Cond' in plan:
+                yield plan['Index Cond']
+            if 'Filter' in plan:
+                yield plan['Filter']
+
         nc.inc_p()
         yield {
             'Type': 'Scan',
             'Subtype': plan['Node Type'],
             'Name': plan['Relation Name'],
             'Alias': plan['Alias'],
+            'Filter': ' AND '.join(_f()),
+            # 'Filter': ' AND'.join([plan.get('Index Cond', None), plan.get('Filter', None)]),
+        }
+
+    elif plan['Node Type'] == 'Bitmap Index Scan':
+        nc.inc_p()
+        yield {
+            'Type': 'Scan',
+            'Subtype': plan['Node Type'],
+            'Name': plan['Index Name'],
+            'Alias': '',
             'Filter': plan.get('Index Cond', ''),
         }
+    elif plan['Node Type'] == 'Bitmap Heap Scan':
+        nc.inc_p()
+        yield {
+            'Type': 'Scan',
+            'Subtype': plan['Node Type'],
+            'Name': plan['Relation Name'],
+            'Alias': plan['Alias'],
+            'Filter': plan.get('Filter', ''),
+        }
+        for p in plan['Plans']:
+            yield from transverse_plan(p)
     elif plan['Node Type'] == 'Hash':
         nc.inc_t()
         assert len(plan['Plans']) == 1, "Length of Plans of Type Hash is more than one."
@@ -139,46 +133,132 @@ def transverse_plan(plan):
         yield from transverse_plan(plan['Plans'][0])
     else:
         nc.inc_t()
-        logging.warning(f"WARNING: Unimplemented Node Type{plan['Node Type']}")
+        logging.warning(f"WARNING: Unimplemented Node Type {plan['Node Type']}")
         for p in plan['Plans']:
             yield from transverse_plan(p)
 
 
+def format_ann(result: dict, use_alias=False):
+    if result['Type'] == 'Join':
+        return f"{result['Subtype']} on {result['Filter']}"
+    elif result['Type'] == 'Scan':
+        return f"Filtered on {result['Subtype']} of {result['Name']}"
+
+
+def parse_expr_node(query: dict, result: dict) -> bool:
+    # logging.info(f'query={query}, result={result}')
+    """
+    :param query:
+    :param result:
+    :return:
+    """
+    if 'ann' in query.keys():
+        return False
+    comp_ops = {
+        'gt': (' > ', ' < '),
+        'lt': (' < ', ' > '),
+        'eq': (' = ', ' = '),
+        'neq': (' <> ', ' <> '),
+        'gte': (' >= ', ' <= '),
+        'lte': (' <= ', ' >= '),
+        'like': (' ~~ ', ' ~~ '),  # TODO: (((part.p_type)::text ~~ '%%BRASS'::text)
+        'not_like': (' !~~ ', ' !~~ '),
+    }
+    op = list(query.keys())[0]
+    if op == 'and' or op == 'or':
+        res = False
+        for subq in query[op]:
+            if type(subq) is dict:
+                # TODO: If we return early, some condition in query might not be tagged.
+                #       If we return late, we will visit unneeded node, try to improve.
+                res |= parse_expr_node(subq, result)
+            else:
+                raise NotImplementedError(f'{subq}')
+        return res
+    elif op in comp_ops:
+        """
+        ((lineitem.l_shipdate >= '1994-01-01'::date) 
+        (lineitem.l_shipdate < '1995-01-01 00:00:00'::timestamp without time zone)
+
+        {'gte': ['lineitem.l_shipdate', {'literal': '1994-01-01'}]}
+        {'lt': ['lineitem.l_shipdate', {'add': [{'date': {'literal': '1994-01-01'}}, {'interval': [1, 'year']}]}]}
+        """
+        arr = []
+        for subq in query[op]:
+            if type(subq) is str:
+                arr.append(subq)
+            elif type(subq) in [int, float]:
+                # TODO: handle numeric
+                arr.append(str(subq))
+            elif type(subq) is dict:
+                if 'literal' in subq:
+                    arr.append(f"'{subq['literal']}'")
+                elif 'date' in subq:
+                    arr.append(f"'{subq['date']['literal']}'")
+                    pass
+                elif len(subq.keys() & {'sub', 'add'}) > 0:
+                    arr.append('$')
+                    pass  # TODO: should recurse to calculator
+                else:
+                    arr.append('$')
+                    find_query_node(subq, result)
+                    pass  # TODO: should be recursing to find_query_node
+            else:
+                raise NotImplementedError(f'{subq}')
+        exp = (comp_ops[op][0].join(arr), comp_ops[op][1].join(reversed(arr)))
+        if any(x in result['Filter'] for x in exp):
+            query['ann'] = format_ann(result)
+            return True
+        else:
+            return False
+    elif op == 'between':
+        """
+        {'between': ['lineitem.l_discount', {'sub': [0.06, 0.01]}, {'add': [0.06, 0.01]}]}
+        (lineitem.l_discount >= 0.05) AND (lineitem.l_discount <= 0.07)
+        """
+        # TODO: WRONG
+        return parse_expr_node({
+            'and': [{'lt': [query[op][1], query[op][0]]},
+                    {'lt': [query[op][0], query[op][2]]}]
+        }, result)
+        pass
+    elif op == 'exists':
+        find_query_node(query[op], result)
+        return True
+    elif op == 'not':
+        return parse_expr_node(query[op], result)
+    elif op in ['in', 'nin']:
+        if type(query[op][1]) is dict:
+            if 'literal' in query[op][1]:
+                # If with literal array
+                # LHS = ANY('{13,31,23,29,30,18,17}'::text[])
+                pass
+            else:
+                # If with subquery, become equijoin
+                find_query_node(query[op][1], result)
+        elif type(query[op][1]) is list:
+            assert type(query[op][1][0]) in [str, int, float]
+            # LHS = ANY('{49,14,23,45,19,3,36,9}'::integer[])
+        return False
+    else:
+        raise NotImplementedError(f'{op}')
+
+
 def find_query_node(query: dict, result: dict):
-    logging.debug(f'find_query_node|query={query}, result={result}')
-    conj_ops = {'and', 'or'}
+    # logging.info(f'query={query}, result={result}')
     nc = NodeCoverage()
     if result['Type'] == 'Join':  # look at WHERE
-        # TODO: does not cover NOT
         if 'where' in query:
-            assert len(query['where'].keys() - {'ann'}) == 1, "dict where len > 1"  # TODO: TEMP FIX
             if result['Filter'] == '':
                 # For Nested Loop without explicit Filter, we try to find the condition by matching column names
                 possible_cond = []
                 for cond in [f'{x} = {y}' for x in result['Possible LHS'] for y in result['Possible RHS']]:
-                    if conj_op := conj_ops.intersection(query['where'].keys()):
-                        for sub_cond in query['where'][conj_op.pop()]:
-                            if compare_condition(sub_cond, cond):
-                                nc.inc_q()
-                                sub_cond['ann'] = f"{result['Subtype']} on {cond}"
-                                possible_cond.append(sub_cond)
-                    else:
-                        if compare_condition(query['where'], result['Filter']):
-                            nc.inc_q()
-                            query['where']['ann'] = f"{result['Subtype']} on {cond}"
-                            possible_cond.append(query['where'])
-                assert len(possible_cond) <= 1, "MORE THAN ONE POSSIBLE CONDITION"
+                    result['Filter'] = cond
+                    if parse_expr_node(query['where'], result):
+                        possible_cond.append(cond)
             else:
-                if conj_op := conj_ops.intersection(query['where'].keys()):
-                    for sub_cond in query['where'][conj_op.pop()]:
-                        if compare_condition(sub_cond, result['Filter']):
-                            nc.inc_q()
-                            sub_cond['ann'] = f"{result['Subtype']} on {result['Filter']}"
-                            break
-                else:
-                    if compare_condition(query['where'], result['Filter']):
-                        nc.inc_q()
-                        query['where']['ann'] = f"{result['Subtype']} on {result['Filter']}"
+                parse_expr_node(query['where'], result)
+            # _find_query_node_where(query['where'], result)
         # TODO: return when annotated already
         if type(query['from']) is dict and type(query['from']['value']) is dict:
             find_query_node(query['from']['value'], result)
@@ -187,6 +267,7 @@ def find_query_node(query: dict, result: dict):
                 if type(v) is dict and type(v['value']) is dict:
                     find_query_node(v['value'], result)
     elif result['Type'] == 'Scan':  # look at FROM
+        # TODO: BUG multiple from statement are assigned the same scan statement
         # goto from
         if type(query['from']) is str:
             if query['from'] == result['Name'] and query['from'] == result['Alias']:
@@ -196,7 +277,10 @@ def find_query_node(query: dict, result: dict):
                     'ann': f"{result['Subtype']} {result['Name']}"
                 }
         elif type(query['from']) is dict:
-            if query['from']['value'] == result['Name'] and query['from'].get('name', '') == result['Alias']:
+            if type(query['from']['value']) is dict:
+                find_query_node(query['from']['value'], result)
+            elif type(query['from']['value']) is str and query['from']['value'] == result['Name'] and query['from'].get(
+                    'name', '') == result['Alias']:
                 nc.inc_q()
                 query['from']['ann'] = f"{result['Subtype']} {result['Name']} as {result['Alias']}"
         elif type(query['from']) is list:
@@ -220,16 +304,8 @@ def find_query_node(query: dict, result: dict):
                         break
         # if filter exist, goto where
         if result['Filter'] != '':
-            assert len(query['where'].keys() - {'ann'}) == 1, "dict where len > 1"  # TODO: TEMP FIX
-            if conj_op := conj_ops.intersection(query['where'].keys()):
-                for sub_cond in query['where'][conj_op.pop()]:
-                    if compare_condition(sub_cond, result['Filter']):
-                        nc.inc_q()
-                        sub_cond['ann'] = f"{result['Subtype']} {result['Name']} Filter on {result['Filter']}"
-            else:
-                if compare_condition(query['where'], result['Filter']):
-                    nc.inc_q()
-                    query['where']['ann'] = f"{result['Subtype']} {result['Name']} Filter on {result['Filter']}"
+            if 'where' in query:
+                parse_expr_node(query['where'], result)
 
 
 def transverse_query(query: dict, plan: dict):
@@ -297,17 +373,17 @@ def rename_column_to_full_name(query_tree: typing.Union[dict, list], column_rela
             if type(val) is str:
                 if '.' not in val and val in column_relation_dict and len(column_relation_dict[val]) == 1:
                     query_tree[key] = f'{column_relation_dict[val][0]}.{val}'
-            elif type(val) is not int:
+            elif type(val) not in [int, float]:
                 rename_column_to_full_name(val, column_relation_dict)
     elif type(query_tree) is list:
         for i, v in enumerate(query_tree):
             if type(v) is str:
                 if '.' not in v and v in column_relation_dict and len(column_relation_dict[v]) == 1:
                     query_tree[i] = f'{column_relation_dict[v][0]}.{v}'
-            elif type(v) is not int:
+            elif type(v) not in [int, float]:
                 rename_column_to_full_name(v, column_relation_dict)
     else:
-        raise NotImplementedError(f"{query_tree['where']}")
+        raise NotImplementedError(f"{query_tree}")
 
 
 def preprocess_query_tree(cur, query_tree):
