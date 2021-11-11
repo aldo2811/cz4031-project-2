@@ -428,6 +428,16 @@ def preprocess_query_tree(cur, query_tree):
     rename_column_to_full_name(query_tree, column_relation_dict)
 
 
+def reparse_without_expand(statement_dict):
+    temp = []
+    annotation = get_annotation(statement_dict)
+    if 'ann' in statement_dict.keys():
+        del statement_dict['ann']
+    statement = format(statement_dict)
+    temp.append(format_query(statement, annotation))
+    return temp
+
+
 def format_keyword_special(statement_dict):
     formatted = format(statement_dict)
     return formatted.split('""', 1)[1].strip()
@@ -511,12 +521,9 @@ def reparse_literal(value: any):
 def reparse_arithmetic_operation(statement_dict: dict, symbol_op: str):
     temp = []
 
-    # if 'expand' not in statement_dict.keys():
-    #     annotation = get_annotation(statement_dict)
-    #     del statement_dict['annotation']
-    #     statement = format(statement_dict)
-    #     temp.append(format_query(statement, annotation))
-    #     return temp
+    if 'expand' not in statement_dict.keys():
+        temp.extend(reparse_without_expand(statement_dict))
+        return temp
 
     symbol_ops = {'mul': '*', 'sub': '-', 'add': '+', 'div': '/', 'mod': '%'}
     operands = statement_dict[symbol_op]
@@ -573,12 +580,9 @@ def reparse_arithmetic_operation(statement_dict: dict, symbol_op: str):
 def reparse_keyword_operation(statement_dict: dict, op: str, comma: bool = False):
     temp = []
 
-    # if 'expand' not in statement_dict.keys():
-    #     annotation = get_annotation(statement_dict)
-    #     del statement_dict['annotation']
-    #     statement = format(statement_dict)
-    #     temp.append(format_query(statement, annotation))
-    #     return temp
+    if 'expand' not in statement_dict.keys():
+        temp.extend(reparse_without_expand(statement_dict))
+        return temp
 
     operand = statement_dict[op]
 
@@ -609,12 +613,9 @@ def reparse_keyword_operation(statement_dict: dict, op: str, comma: bool = False
 def reparse_conjunction_operation(statement_dict: dict, conj_op: str):
     temp = []
 
-    # if 'expand' not in statement_dict.keys():
-    #     annotation = get_annotation(statement_dict)
-    #     del statement_dict['annotation']
-    #     statement = format(statement_dict)
-    #     temp.append(format_query(statement, annotation))
-    #     return temp
+    if 'expand' not in statement_dict.keys():
+        temp.extend(reparse_without_expand(statement_dict))
+        return temp
 
     operands = statement_dict[conj_op]
     assert type(operands) is list
@@ -667,12 +668,9 @@ def reparse_conjunction_operation(statement_dict: dict, conj_op: str):
 def reparse_not_operation(statement_dict: dict):
     temp = []
 
-    # if 'expand' not in statement_dict.keys():
-    #     annotation = get_annotation(statement_dict)
-    #     del statement_dict['annotation']
-    #     statement = format(statement_dict)
-    #     temp.append(format_query(statement, annotation))
-    #     return temp
+    if 'expand' not in statement_dict.keys():
+        temp.extend(reparse_without_expand(statement_dict))
+        return temp
 
     operand = statement_dict['not']
 
@@ -704,12 +702,9 @@ def reparse_not_operation(statement_dict: dict):
 def reparse_comparison_operation(statement_dict: dict, comp_op: str):
     temp = []
 
-    # if 'expand' not in statement_dict.keys():
-    #     annotation = get_annotation(statement_dict)
-    #     del statement_dict['annotation']
-    #     statement = format(statement_dict)
-    #     temp.append(format_query(statement, annotation))
-    #     return temp
+    if 'expand' not in statement_dict.keys():
+        temp.extend(reparse_without_expand(statement_dict))
+        return temp
 
     comp_ops = {
         'gt': '>',
@@ -779,12 +774,9 @@ def reparse_comparison_operation(statement_dict: dict, comp_op: str):
 def reparse_datetime_operation(statement_dict: dict, datetime_op: str):
     temp = []
 
-    # if 'expand' not in statement_dict.keys():
-    #     annotation = get_annotation(statement_dict)
-    #     del statement_dict['annotation']
-    #     statement = format(statement_dict)
-    #     temp.append(format_query(statement, annotation))
-    #     return temp
+    if 'expand' not in statement_dict.keys():
+        temp.extend(reparse_without_expand(statement_dict))
+        return temp
 
     operand = statement_dict[datetime_op]
 
@@ -809,12 +801,9 @@ def reparse_other_operations(statement_dict: dict):
 def reparse_exists_keyword(statement_dict: dict):
     temp = []
 
-    # if 'expand' not in statement_dict.keys():
-    #     annotation = get_annotation(statement_dict)
-    #     del statement_dict['annotation']
-    #     statement = format(statement_dict)
-    #     temp.append(format_query(statement, annotation))
-    #     return temp
+    if 'expand' not in statement_dict.keys():
+        temp.extend(reparse_without_expand(statement_dict))
+        return temp
 
     operand = statement_dict['exists']
 
@@ -829,12 +818,9 @@ def reparse_exists_keyword(statement_dict: dict):
 def reparse_between_keyword(statement_dict: dict):
     temp = []
 
-    # if 'expand' not in statement_dict.keys():
-    #     annotation = get_annotation(statement_dict)
-    #     del statement_dict['annotation']
-    #     statement = format(statement_dict)
-    #     temp.append(format_query(statement, annotation))
-    #     return temp
+    if 'expand' not in statement_dict.keys():
+        temp.extend(reparse_without_expand(statement_dict))
+        return temp
 
     operand = statement_dict['between']
     temp.append(format_query(operand[0] + ' BETWEEN '))
