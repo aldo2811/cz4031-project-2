@@ -350,11 +350,14 @@ def process(conn, query):
     :return: formatted_query, annotation
     """
     cur = conn.cursor()
+    query = preprocess_query_string(query)
     plan = get_query_execution_plan(cur, query)
     parsed_query = parse(query)
-    transverse_query(parsed_query, plan)
-    # TODO: convert parsed_query to line-break separated query and annotation
-    return "QUERY", "ANN"
+    preprocess_query_tree(cur, parsed_query)
+    transverse_query(parsed_query, plan[0][0]['Plan'])
+    result = []
+    reparse_query(result, parsed_query)
+    return [q['statement'] for q in result], [q['annotation'] for q in result]
 
 
 def preprocess_query_string(query):
