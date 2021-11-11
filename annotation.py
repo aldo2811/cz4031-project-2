@@ -850,38 +850,6 @@ def format_query(statement: str, annotation: str = ''):
     return {'statement': statement, 'annotation': annotation}
 
 
-def reparse_select_keyword(formatted_query: list, identifier: any, last_identifier: bool = True):
-    temp = []
-
-    if type(identifier) is str:
-        temp.append(format_query(identifier))
-    elif type(identifier) is dict:
-        if type(identifier['value']) is str:
-            statement = identifier['value']
-
-            if not last_identifier:
-                statement += ','
-            temp.append(format_query(statement))
-        elif type(identifier['value']) is dict:
-            keyword_op = find_keyword_operation(identifier['value'])
-            if keyword_op is not None:
-                if 'name' in identifier:
-                    subquery = reparse_keyword_operation(identifier['value'], keyword_op)
-                    temp.extend(subquery)
-                    name_str = 'AS ' + identifier['name']
-                    if not last_identifier:
-                        name_str += ','
-                    temp.append(format_query(name_str))
-                else:
-                    subquery = reparse_keyword_operation(identifier['value'], keyword_op, comma=not last_identifier)
-                    temp.extend(subquery)
-    elif type(identifier) is list:
-        for i, single_identifier in enumerate(identifier):
-            reparse_select_keyword(temp, single_identifier, i == len(identifier) - 1)
-
-    formatted_query.extend(temp)
-
-
 def reparse_from_keyword(formatted_query: list, identifier: any, last_identifier: bool = True):
     temp = []
 
@@ -953,11 +921,10 @@ def reparse_query(formatted_query: list, statement_dict: dict):
 
     for keyword, identifier in statement_dict.items():
         if keyword.startswith('select'):
-            select_keyword = 'SELECT'
-            if keyword == 'select_distinct':
-                select_keyword += ' DISTINCT'
-            temp.append(format_query(select_keyword))
-            reparse_select_keyword(temp, identifier)
+            appended_identifier = {keyword: identifier}
+            if 'distinct_on' in statement_dict.keys():
+                appended_identifier['distinct_on'] = statement_dict['distinct_on']
+            temp.append(format_query(format(appended_identifier)))
         elif keyword == 'from':
             temp.append(format_query('FROM'))
             reparse_from_keyword(temp, identifier)
