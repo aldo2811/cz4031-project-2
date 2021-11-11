@@ -24,9 +24,6 @@ class ScrollableLabel(QScrollArea):
     def setText(self, text):
         self.label.setText(text)
 
-    def getValue(self):
-        return QScrollArea.verticalScrollBar().value()
-
 
 class MyWindow(QMainWindow):
     def __init__(self):
@@ -61,10 +58,14 @@ class MyWindow(QMainWindow):
         self.queryOutput.setText("Output Query goes here")
         self.queryOutput.move(30, 400)
         self.queryOutput.resize(770, 450)
+        self.queryOutput.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.queryOutput.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
 
         self.queryAnnotate.setText("Annotation goes here")
         self.queryAnnotate.move(820, 400)
         self.queryAnnotate.resize(750, 450)
+        self.queryAnnotate.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.queryAnnotate.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
 
         self.queryOutput.verticalScrollBar().valueChanged.connect(
             self.queryAnnotate.verticalScrollBar().setValue)
