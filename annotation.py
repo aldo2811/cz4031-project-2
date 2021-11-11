@@ -22,6 +22,7 @@ def import_config():
 
 def open_db(db_name, db_uname, db_pass, db_host, db_port):
     conn = psycopg2.connect(database=db_name, user=db_uname, password=db_pass, host=db_host, port=db_port)
+    conn.set_session(readonly=True, autocommit=True)
     return conn
 
 
