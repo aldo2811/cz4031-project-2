@@ -758,6 +758,9 @@ def reparse_comparison_operation(statement_dict: dict, comp_op: str):
                         temp.append(format_query(subquery))
 
                     temp.append(format_query(')'))
+            elif type(operand) is list:
+                if all(isinstance(x, int) for x in operand):
+                    statement += '(' + ', '.join([str(o) for o in operand]) + ')'
 
             if i < len(operands) - 1:
                 if statement != '':
