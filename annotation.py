@@ -815,7 +815,7 @@ def reparse_exists_keyword(statement_dict: dict):
     if type(operand) is dict:
         temp.append(format_query('EXISTS ('))
         reparse_query(temp, operand)
-        temp.append(')')
+        temp.append(format_query(')'))
 
     return temp
 
