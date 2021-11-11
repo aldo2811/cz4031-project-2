@@ -174,6 +174,8 @@ def parse_expr_node(query: dict, result: dict) -> bool:
                 res |= parse_expr_node(subq, result)
             else:
                 raise NotImplementedError(f'{subq}')
+        if res:
+            query['expand'] = True
         return res
     elif op in comp_ops:
         """
@@ -184,6 +186,7 @@ def parse_expr_node(query: dict, result: dict) -> bool:
         {'lt': ['lineitem.l_shipdate', {'add': [{'date': {'literal': '1994-01-01'}}, {'interval': [1, 'year']}]}]}
         """
         arr = []
+        annotated = False
         for subq in query[op]:
             if type(subq) is str:
                 arr.append(subq)
@@ -201,8 +204,9 @@ def parse_expr_node(query: dict, result: dict) -> bool:
                     pass  # TODO: should recurse to calculator
                 else:
                     arr.append('$')
-                    find_query_node(subq, result)
-                    pass  # TODO: should be recursing to find_query_node
+                    if find_query_node(subq, result):
+                        query['expand'] = True
+                        annotated = True
             else:
                 raise NotImplementedError(f'{subq}')
         exp = (comp_ops[op][0].join(arr), comp_ops[op][1].join(reversed(arr)))
@@ -210,7 +214,7 @@ def parse_expr_node(query: dict, result: dict) -> bool:
             query['ann'] = format_ann(result)
             return True
         else:
-            return False
+            return annotated
     elif op == 'between':
         """
         {'between': ['lineitem.l_discount', {'sub': [0.06, 0.01]}, {'add': [0.06, 0.01]}]}
@@ -221,12 +225,16 @@ def parse_expr_node(query: dict, result: dict) -> bool:
             'and': [{'lt': [query[op][1], query[op][0]]},
                     {'lt': [query[op][0], query[op][2]]}]
         }, result)
-        pass
     elif op == 'exists':
-        find_query_node(query[op], result)
-        return True
+        if find_query_node(query[op], result):
+            query['expand'] = True
+            return True
+        return False
     elif op == 'not':
-        return parse_expr_node(query[op], result)
+        if parse_expr_node(query[op], result):
+            query['expand'] = True
+            return True
+        return False
     elif op in ['in', 'nin']:
         if type(query[op][1]) is dict:
             if 'literal' in query[op][1]:
@@ -235,7 +243,9 @@ def parse_expr_node(query: dict, result: dict) -> bool:
                 pass
             else:
                 # If with subquery, become equijoin
-                find_query_node(query[op][1], result)
+                if find_query_node(query[op][1], result):
+                    query['expand'] = True
+                    return True
         elif type(query[op][1]) is list:
             assert type(query[op][1][0]) in [str, int, float]
             # LHS = ANY('{49,14,23,45,19,3,36,9}'::integer[])
@@ -244,9 +254,8 @@ def parse_expr_node(query: dict, result: dict) -> bool:
         raise NotImplementedError(f'{op}')
 
 
-def find_query_node(query: dict, result: dict):
+def find_query_node(query: dict, result: dict) -> bool:
     # logging.info(f'query={query}, result={result}')
-    nc = NodeCoverage()
     if result['Type'] == 'Join':  # look at WHERE
         if 'where' in query:
             if result['Filter'] == '':
@@ -256,57 +265,67 @@ def find_query_node(query: dict, result: dict):
                     result['Filter'] = cond
                     if parse_expr_node(query['where'], result):
                         possible_cond.append(cond)
+                assert len(possible_cond) <= 1, "MORE THAN ONE POSSIBLE CONDITION"
+                if len(possible_cond) == 1:
+                    return True
             else:
-                parse_expr_node(query['where'], result)
-            # _find_query_node_where(query['where'], result)
+                if parse_expr_node(query['where'], result):
+                    return True
         # TODO: return when annotated already
         if type(query['from']) is dict and type(query['from']['value']) is dict:
-            find_query_node(query['from']['value'], result)
+            if find_query_node(query['from']['value'], result):
+                return True
         if type(query['from']) is list:
             for v in query['from']:
                 if type(v) is dict and type(v['value']) is dict:
-                    find_query_node(v['value'], result)
+                    if find_query_node(v['value'], result):
+                        return True
     elif result['Type'] == 'Scan':  # look at FROM
         # TODO: BUG multiple from statement are assigned the same scan statement
         # goto from
+        annotated = False
         if type(query['from']) is str:
             if query['from'] == result['Name'] and query['from'] == result['Alias']:
-                nc.inc_q()
                 query['from'] = {
                     'value': query['from'],
                     'ann': f"{result['Subtype']} {result['Name']}"
                 }
+                annotated = True
         elif type(query['from']) is dict:
             if type(query['from']['value']) is dict:
-                find_query_node(query['from']['value'], result)
+                if find_query_node(query['from']['value'], result):
+                    query['from']['expand'] = True
+                    annotated = True
             elif type(query['from']['value']) is str and query['from']['value'] == result['Name'] and query['from'].get(
                     'name', '') == result['Alias']:
-                nc.inc_q()
+                annotated = True
                 query['from']['ann'] = f"{result['Subtype']} {result['Name']} as {result['Alias']}"
         elif type(query['from']) is list:
             for i, rel in enumerate(query['from']):
                 if type(rel) is str:
                     if rel == result['Name'] and rel == result['Alias']:
-                        nc.inc_q()
                         query['from'][i] = {
                             'value': rel,
                             'ann': f"{result['Subtype']} {result['Name']}"
                         }
+                        annotated = True
                         break
                 else:
                     if type(rel['value']) is dict:
-                        find_query_node(rel['value'], result)
+                        if find_query_node(rel['value'], result):
+                            rel['expand'] = True
+                            annotated = True
                         continue
                     assert type(rel['value']) is str
                     if rel['value'] == result['Name'] and rel.get('name', '') == result['Alias']:
-                        nc.inc_q()
                         rel['ann'] = f"{result['Subtype']} {result['Name']} as {result['Alias']}"
+                        annotated = True
                         break
         # if filter exist, goto where
-        if result['Filter'] != '':
-            if 'where' in query:
-                parse_expr_node(query['where'], result)
-
+        if result['Filter'] != '' and 'where' in query:
+            parse_expr_node(query['where'], result)
+        return annotated
+    return False
 
 def transverse_query(query: dict, plan: dict):
     # TODO: have to first check whether ann already exist or not, act accordingly
