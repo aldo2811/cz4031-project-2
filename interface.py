@@ -46,7 +46,7 @@ class MyWindow(QMainWindow):
         self.dbNameTextbox = QTextEdit(self)
 
         # Label to indicate which db name is the app currently connected to
-        self.dbNameLabel = QtWidgets.QLabel(self)
+        self.dbNameLabel = ScrollableLabel(self)
 
         # Error message box
         self.error_dialog = QtWidgets.QErrorMessage()
@@ -59,46 +59,44 @@ class MyWindow(QMainWindow):
 
     def initUI(self):
         self.queryOutput.setText("Output Query goes here")
-        self.queryOutput.move(10, 400)
+        self.queryOutput.move(30, 400)
         self.queryOutput.resize(770, 450)
 
         self.queryAnnotate.setText("Annotation goes here")
         self.queryAnnotate.move(820, 400)
-        self.queryAnnotate.resize(770, 450)
+        self.queryAnnotate.resize(750, 450)
 
         self.queryOutput.verticalScrollBar().valueChanged.connect(
             self.queryAnnotate.verticalScrollBar().setValue)
         self.queryAnnotate.verticalScrollBar().valueChanged.connect(
             self.queryOutput.verticalScrollBar().setValue)
 
-        self.queryTextbox.move(10, 20)
-        self.queryTextbox.resize(770, 350)
+        self.queryTextbox.move(30, 20)
+        self.queryTextbox.resize(750, 350)
         self.queryTextbox.setFont(QFont('Arial', 15))
         self.queryTextbox.setPlaceholderText('Insert SQL Query Here')
 
         self.dbNameTextbox.move(820, 140)
-        self.dbNameTextbox.resize(200, 100)
+        self.dbNameTextbox.resize(300, 100)
         self.dbNameTextbox.setFont(QFont('Arial', 15))
         self.dbNameTextbox.setPlaceholderText('Insert Database Name Here')
 
         self.dbNameLabel.move(820, 20)
-        self.dbNameLabel.resize(200, 100)
-        self.dbNameLabel.setFont(QFont('Arial', 15))
-        self.dbNameLabel.setText(f"Connected to -")
-        self.dbNameLabel.setStyleSheet("background-color: beige; border: 1px solid black;")
+        self.dbNameLabel.resize(300, 100)
+        self.dbNameLabel.setText(f"Current DB Name: ")
 
         self.submitButton.setText("Submit Query")
         self.submitButton.setFont(QFont('Arial', 15))
         self.submitButton.clicked.connect(self.onClick)
         self.submitButton.move(820, 270)
-        self.submitButton.resize(200, 100)
+        self.submitButton.resize(300, 100)
 
     def onClick(self):
         if self.dbName != self.dbNameTextbox.toPlainText():
             try:
                 self.conn = init_conn(self.dbNameTextbox.toPlainText())
                 self.dbName = self.dbNameTextbox.toPlainText()
-                self.dbNameLabel.setText(f"Connected to {self.dbName}")
+                self.dbNameLabel.setText(f"Current DB Name: {self.dbName}")
             except Exception as e:
                 self.error_dialog.showMessage(f"ERROR - {e}")
         if self.conn is not None:
