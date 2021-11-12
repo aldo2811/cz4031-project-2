@@ -1,13 +1,12 @@
 import logging
 import os
-import typing
 from pprint import pprint, pformat
 
 import psycopg2
 from dotenv import load_dotenv
 from mo_sql_parsing import parse, format
 
-from util import NodeCoverage
+from preprocessing import preprocess_query_string, preprocess_query_tree
 
 
 def import_config():
@@ -32,19 +31,16 @@ def get_query_execution_plan(cursor, sql_query):
 
 
 def transverse_plan(plan):
-    nc = NodeCoverage()
     logging.debug(f"now in {plan['Node Type']}")
     if plan['Node Type'] == 'Nested Loop':
         assert len(plan['Plans']) == 2, "Length of Plans is more than two."
         if 'Join Filter' in plan:
-            nc.inc_p()
             yield {
                 'Type': 'Join',
                 'Subtype': plan['Node Type'],
                 'Filter': plan['Join Filter'],
             }
         else:  # else can try heuristic to recover join condition IF both children are scan
-            nc.inc_p()
             yield {
                 'Type': 'Join',
                 'Subtype': plan['Node Type'],
@@ -55,7 +51,6 @@ def transverse_plan(plan):
         yield from transverse_plan(plan['Plans'][0])
         yield from transverse_plan(plan['Plans'][1])
     elif plan['Node Type'] == 'Hash Join':
-        nc.inc_p()
         yield {
             'Type': 'Join',
             'Subtype': plan['Node Type'],
@@ -65,7 +60,6 @@ def transverse_plan(plan):
         yield from transverse_plan(plan['Plans'][0])
         yield from transverse_plan(plan['Plans'][1])
     elif plan['Node Type'] == 'Merge Join':
-        nc.inc_p()
         yield {
             'Type': 'Join',
             'Subtype': plan['Node Type'],
@@ -75,7 +69,6 @@ def transverse_plan(plan):
         for p in plan['Plans']:
             yield from transverse_plan(p)
     elif plan['Node Type'] == 'Seq Scan':
-        nc.inc_p()
         yield {
             'Type': 'Scan',
             'Subtype': plan['Node Type'],
@@ -90,7 +83,6 @@ def transverse_plan(plan):
             if 'Filter' in plan:
                 yield plan['Filter']
 
-        nc.inc_p()
         yield {
             'Type': 'Scan',
             'Subtype': plan['Node Type'],
@@ -101,7 +93,6 @@ def transverse_plan(plan):
         }
 
     elif plan['Node Type'] == 'Bitmap Index Scan':
-        nc.inc_p()
         yield {
             'Type': 'Scan',
             'Subtype': plan['Node Type'],
@@ -110,7 +101,6 @@ def transverse_plan(plan):
             'Filter': plan.get('Index Cond', ''),
         }
     elif plan['Node Type'] == 'Bitmap Heap Scan':
-        nc.inc_p()
         yield {
             'Type': 'Scan',
             'Subtype': plan['Node Type'],
@@ -120,20 +110,7 @@ def transverse_plan(plan):
         }
         for p in plan['Plans']:
             yield from transverse_plan(p)
-    elif plan['Node Type'] == 'Hash':
-        nc.inc_t()
-        assert len(plan['Plans']) == 1, "Length of Plans of Type Hash is more than one."
-        yield from transverse_plan(plan['Plans'][0])
-    elif plan['Node Type'] == 'Unique':
-        nc.inc_t()
-        assert len(plan['Plans']) == 1, "Length of Plans of Type Unique is more than one."
-        yield from transverse_plan(plan['Plans'][0])
-    elif plan['Node Type'] == 'Materialize':
-        nc.inc_t()
-        assert len(plan['Plans']) == 1, "Length of Plans of Type Materialize is more than one."
-        yield from transverse_plan(plan['Plans'][0])
     else:
-        nc.inc_t()
         logging.warning(f"WARNING: Unimplemented Node Type {plan['Node Type']}")
         for p in plan['Plans']:
             yield from transverse_plan(p)
@@ -162,7 +139,7 @@ def parse_expr_node(query: dict, result: dict) -> bool:
         'neq': (' <> ', ' <> '),
         'gte': (' >= ', ' <= '),
         'lte': (' <= ', ' >= '),
-        'like': (' ~~ ', ' ~~ '),  # TODO: (((part.p_type)::text ~~ '%%BRASS'::text)
+        'like': (' ~~ ', ' ~~ '),
         'not_like': (' !~~ ', ' !~~ '),
     }
     op = list(query.keys())[0]
@@ -170,8 +147,6 @@ def parse_expr_node(query: dict, result: dict) -> bool:
         res = False
         for subq in query[op]:
             if type(subq) is dict:
-                # TODO: If we return early, some condition in query might not be tagged.
-                #       If we return late, we will visit unneeded node, try to improve.
                 res |= parse_expr_node(subq, result)
             else:
                 raise NotImplementedError(f'{subq}')
@@ -192,17 +167,14 @@ def parse_expr_node(query: dict, result: dict) -> bool:
             if type(subq) is str:
                 arr.append(subq)
             elif type(subq) in [int, float]:
-                # TODO: handle numeric
                 arr.append(str(subq))
             elif type(subq) is dict:
                 if 'literal' in subq:
                     arr.append(f"'{subq['literal']}'")
                 elif 'date' in subq:
                     arr.append(f"'{subq['date']['literal']}'")
-                    pass
                 elif len(subq.keys() & {'sub', 'add'}) > 0:
                     arr.append('$')
-                    pass  # TODO: should recurse to calculator
                 else:
                     arr.append('$')
                     if find_query_node(subq, result):
@@ -221,11 +193,7 @@ def parse_expr_node(query: dict, result: dict) -> bool:
         {'between': ['lineitem.l_discount', {'sub': [0.06, 0.01]}, {'add': [0.06, 0.01]}]}
         (lineitem.l_discount >= 0.05) AND (lineitem.l_discount <= 0.07)
         """
-        # TODO: WRONG
-        return parse_expr_node({
-            'and': [{'lt': [query[op][1], query[op][0]]},
-                    {'lt': [query[op][0], query[op][2]]}]
-        }, result)
+        return False
     elif op == 'exists':
         if find_query_node(query[op], result):
             query['expand'] = True
@@ -272,7 +240,6 @@ def find_query_node(query: dict, result: dict) -> bool:
             else:
                 if parse_expr_node(query['where'], result):
                     return True
-        # TODO: return when annotated already
         if type(query['from']) is dict and type(query['from']['value']) is dict:
             if find_query_node(query['from']['value'], result):
                 return True
@@ -282,7 +249,6 @@ def find_query_node(query: dict, result: dict) -> bool:
                     if find_query_node(v['value'], result):
                         return True
     elif result['Type'] == 'Scan':  # look at FROM
-        # TODO: BUG multiple from statement are assigned the same scan statement
         # goto from
         annotated = False
         if type(query['from']) is str:
@@ -329,7 +295,6 @@ def find_query_node(query: dict, result: dict) -> bool:
     return False
 
 def transverse_query(query: dict, plan: dict):
-    # TODO: have to first check whether ann already exist or not, act accordingly
     for result in transverse_plan(plan):  # iterate over node in root
         find_query_node(query, result)
 
@@ -359,74 +324,6 @@ def process(conn, query):
     result = []
     reparse_query(result, parsed_query)
     return [q['statement'] for q in result], [q['annotation'] for q in result]
-
-
-def preprocess_query_string(query):
-    return ' '.join([word.lower() if word[0] != '"' and word[0] != "'" else word for word in query.split()])
-
-
-def collect_relation_list(query_tree, rel_list):
-    if type(query_tree['from']) is str:
-        rel_list.append(query_tree['from'])
-    elif type(query_tree['from']) is dict:
-        if type(query_tree['from']['value']) is str:
-            rel_list.append(query_tree['from']['value'])
-        elif type(query_tree['from']['value']) is dict:
-            collect_relation_list(query_tree['from']['value'], rel_list)
-        else:
-            raise NotImplementedError(f"{query_tree['from']['value']}")
-    elif type(query_tree['from']) is list:
-        for rel in query_tree['from']:
-            if type(rel) is str:
-                rel_list.append(rel)
-            elif type(rel) is dict:
-                if type(rel['value']) is str:
-                    rel_list.append(rel['value'])
-                elif type(rel['value']) is dict:
-                    collect_relation_list(rel['value'], rel_list)
-                else:
-                    raise NotImplementedError(f"{rel['value']}")
-
-
-def rename_column_to_full_name(query_tree: typing.Union[dict, list], column_relation_dict: dict):
-    if type(query_tree) is dict:
-        for key, val in query_tree.items():
-            if key in ['literal', 'interval']:
-                continue
-            if type(val) is str:
-                if '.' not in val and val in column_relation_dict and len(column_relation_dict[val]) == 1:
-                    query_tree[key] = f'{column_relation_dict[val][0]}.{val}'
-            elif type(val) not in [int, float]:
-                rename_column_to_full_name(val, column_relation_dict)
-    elif type(query_tree) is list:
-        for i, v in enumerate(query_tree):
-            if type(v) is str:
-                if '.' not in v and v in column_relation_dict and len(column_relation_dict[v]) == 1:
-                    query_tree[i] = f'{column_relation_dict[v][0]}.{v}'
-            elif type(v) not in [int, float]:
-                rename_column_to_full_name(v, column_relation_dict)
-    else:
-        raise NotImplementedError(f"{query_tree}")
-
-
-def preprocess_query_tree(cur, query_tree):
-    rel_list = []
-    column_relation_dict = {}
-    collect_relation_list(query_tree, rel_list)
-    logging.debug(f'rel_list={rel_list}')
-    # Collect column info
-    for rel in rel_list:
-        cur.execute(f"SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name = '{rel}'")
-        res = cur.fetchall()
-        # pprint(res)
-        for col in res:
-            if col in column_relation_dict:
-                column_relation_dict[col[0]].append(rel)
-            else:
-                column_relation_dict[col[0]] = [rel]
-    logging.debug(f'column_relation_dict={column_relation_dict}')
-    # For every column, if no dot, try to find in dict, if multiple relation raise exception, else rename
-    rename_column_to_full_name(query_tree, column_relation_dict)
 
 
 def reparse_without_expand(statement_dict):
@@ -856,7 +753,6 @@ def reparse_from_keyword(formatted_query: list, identifier: any, last_identifier
     if type(identifier) is dict:
         name = get_name(identifier)
         annotation = get_annotation(identifier)
-        # TODO: refactor logic
         end_statement = ''
 
         if type(identifier['value']) is str:
@@ -954,7 +850,6 @@ def annotate_query(parsed_query: dict):
 
 
 def main():
-    nc = NodeCoverage()
     logging.basicConfig(filename='log/debug.log', filemode='w', level=logging.DEBUG)
     db_name, db_uname, db_pass, db_host, db_port = import_config()
     conn = open_db(db_name, db_uname, db_pass, db_host, db_port)
@@ -998,9 +893,6 @@ PS_SUPPLYCOST = (SELECT MIN(PS_SUPPLYCOST) FROM PARTSUPP, SUPPLIER, NATION, REGI
  AND S_NATIONKEY = N_NATIONKEY AND N_REGIONKEY = R_REGIONKEY AND R_NAME = 'EUROPE')
 ORDER BY S_ACCTBAL DESC, N_NAME, S_NAME, P_PARTKEY
 LIMIT 100;""",
-        # Test cases too hard to do
-        # "SELECT * FROM nation as n1, (SELECT * FROM nation as n1) as n2 WHERE n1.n_regionkey = n2.n_regionkey;",
-        # "SELECT * FROM nation as n1, (SELECT n1.n_regionkey FROM nation as n1) as n2 WHERE n1.n_regionkey = n2.n_regionkey;",
     ]
 
     for query in queries:
@@ -1025,7 +917,6 @@ LIMIT 100;""",
             pprint(result)
         print()
 
-    print(nc)
     cur.close()
 
 
