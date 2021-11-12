@@ -2,6 +2,7 @@
 
 ## Prerequisite:
 - Python (3.8+)
+- Pip (minimum version 21)
 - Postgres loaded with database (e.g. TPC-H)
 
 ## Preparation
@@ -15,6 +16,9 @@
     | DB_PASS  | password of that user                           |
     | DB_HOST  | address of the DB (e.g. localhost, 192.168.1.5) |
     | DB_PORT  | port number of the DB                           |
+
+### Update `pip` 
+Run `pip3 install --upgrade pip`
 
 ##  How to run
 1. Setup `.env` file as above
@@ -32,3 +36,7 @@ Q: I don't have `py` installed.
 
 A: In step 2, use `<path_to_python.exe> -m venv venv` instead.
     Alternatively, look at [this StackOverflow](https://stackoverflow.com/a/5088548).
+
+Q: Why should pip be upgraded?
+
+A: See [this StackOverflow](https://stackoverflow.com/a/67606704)
