@@ -23,7 +23,7 @@
    1. `pip3 install virtualenv`
    2. `py -3 -m venv venv`
    3. `.\venv\Scripts\activate`
-   4. `pip install .\requirements.txt`
+   4. `pip install -r .\requirements.txt`
    5. `python .\project.py`
 
 
