@@ -1,5 +1,6 @@
 import pytest
 from annotation import *
+from preprocessing import preprocess_query_string, preprocess_query_tree
 
 
 @pytest.mark.parametrize("query", [
@@ -191,8 +192,7 @@ ORDER BY CNTRYCODE""",
     # "SELECT * FROM nation as n1, (SELECT n1.n_regionkey FROM nation as n1) as n2 WHERE n1.n_regionkey = n2.n_regionkey;",
     ])
 def test_query(query):
-    db_name, db_uname, db_pass, db_host, db_port = import_config()
-    conn = open_db(db_name, db_uname, db_pass, db_host, db_port)
+    conn = init_conn("TPC-H")
     cur = conn.cursor()
 
     query = preprocess_query_string(query)  # assume all queries are case insensitive

@@ -11,12 +11,11 @@ from preprocessing import preprocess_query_string, preprocess_query_tree
 
 def import_config():
     load_dotenv()
-    db_name = os.getenv("DB_NAME")
     db_uname = os.getenv("DB_UNAME")
     db_pass = os.getenv("DB_PASS")
     db_host = os.getenv("DB_HOST")
     db_port = os.getenv("DB_PORT")
-    return db_name, db_uname, db_pass, db_host, db_port
+    return  db_uname, db_pass, db_host, db_port
 
 
 def open_db(db_name, db_uname, db_pass, db_host, db_port):
@@ -299,11 +298,8 @@ def transverse_query(query: dict, plan: dict):
         find_query_node(query, result)
 
 
-def init_conn(db_name=None):
-    if db_name is None:
-        db_name, db_uname, db_pass, db_host, db_port = import_config()
-    else:
-        _, db_uname, db_pass, db_host, db_port = import_config()
+def init_conn(db_name):
+    db_uname, db_pass, db_host, db_port = import_config()
     conn = open_db(db_name, db_uname, db_pass, db_host, db_port)
     return conn
 
@@ -851,8 +847,7 @@ def annotate_query(parsed_query: dict):
 
 def main():
     logging.basicConfig(filename='log/debug.log', filemode='w', level=logging.DEBUG)
-    db_name, db_uname, db_pass, db_host, db_port = import_config()
-    conn = open_db(db_name, db_uname, db_pass, db_host, db_port)
+    conn = init_conn("TPC-H")
     cur = conn.cursor()
 
     queries = [
